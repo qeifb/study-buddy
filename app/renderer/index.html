@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>学习通学伴</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="app">
+    <!-- 左：会话列表 -->
+    <aside class="sidebar">
+      <div class="side-brand">
+        <span class="logo">📚</span>
+        <span class="brand-name">学习通学伴</span>
+        <button class="side-toggle" id="btn-side-hide" title="收起侧边栏（Ctrl+B）">⇤</button>
+      </div>
+      <button class="new-chat" id="btn-new"><span>＋</span><span>开启新对话</span></button>
+      <div class="chat-list" id="chat-list"></div>
+      <div class="side-foot">
+        <button id="btn-settings">⚙ 设置</button>
+        <button id="btn-open-logs">📂 打开课程日志文件夹</button>
+      </div>
+    </aside>
+
+    <!-- 右：对话 -->
+    <main class="main">
+      <div class="topbar">
+        <button class="side-toggle expand" id="btn-side-show" title="展开侧边栏（Ctrl+B）" hidden>☰</button>
+        <span class="title" id="top-title">新对话</span>
+        <span id="top-hint">课程内容由你本机的浏览器提供，不上传云端</span>
+      </div>
+      <div class="scroll" id="scroll">
+        <div class="hero" id="hero">
+          <div class="big">🐳 你好，我能帮什么忙？</div>
+          <div class="hint">
+            先点下面的「课程日志」，选择你正在看网课的那个浏览器<br>
+            我会把老师讲的内容整理成本地日志，再据此回答你的问题
+          </div>
+        </div>
+        <div class="thread" id="thread"></div>
+      </div>
+      <div class="composer-wrap">
+        <div class="composer">
+          <div class="attach-row" id="attach" hidden>
+            <div class="attach-item">
+              <img id="attach-thumb" alt="待发送的图片">
+              <div class="attach-meta">
+                <span id="attach-name">图片</span>
+                <span class="attach-tip">会连同这节课的课程日志一起交给识图模型</span>
+              </div>
+              <button class="attach-del" id="btn-attach-del" title="移除图片">✕</button>
+            </div>
+          </div>
+          <textarea id="input" placeholder="给 学习通学伴 发送消息" rows="1"></textarea>
+          <div class="composer-bar">
+            <button class="chip" id="btn-log">📝 课程日志</button>
+            <button class="chip" id="btn-image">🖼 图片答疑</button>
+            <label class="course-pick" id="course-pick" title="选定后，AI 只依据这节课的日志回答；不选就自动判断">
+              <span class="course-pick-icon">📚</span>
+              <select id="course-select" aria-label="指定课程">
+                <option value="">自动判断课程</option>
+              </select>
+            </label>
+            <input type="file" id="file-image" accept="image/png,image/jpeg,image/webp,image/gif" hidden>
+            <span class="spacer"></span>
+            <button class="send" id="btn-send" title="发送">↑</button>
+          </div>
+        </div>
+        <div class="foot-note">内容由 AI 生成，请结合课程原文核对　·　图片可直接 Ctrl+V 粘贴进来</div>
+      </div>
+    </main>
+  </div>
+
+  <!-- 浏览器选择 -->
+  <div class="modal-mask" id="modal-browser" hidden>
+    <div class="modal">
+      <div class="modal-head">选择要抓取的浏览器</div>
+      <div class="modal-sub">
+        如果你同时开了多个浏览器或多个网课窗口，这里选哪一个，就只抓哪一个。<br>
+        只有开着调试端口的浏览器才能抓取；没开的会标成黄色，先按提示启动。
+      </div>
+      <div class="modal-body" id="browser-list"></div>
+      <div class="modal-note">
+        <label class="reuse-row">
+          <input type="checkbox" id="opt-reuse" checked>
+          <span>本地已有这节课的日志时直接复用，不再重复下载与转写</span>
+        </label>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="btn-refresh">刷新列表</button>
+        <button class="btn" id="btn-cancel-browser">取消</button>
+        <button class="btn primary" id="btn-start-capture" disabled>开始抓取</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 设置 -->
+  <div class="modal-mask" id="modal-settings" hidden>
+    <div class="modal">
+      <div class="modal-head">设置</div>
+      <div class="modal-sub">模型只用于「分析课程内容」和「回答你的问题」，课程文件始终留在你电脑上。</div>
+      <div class="modal-body">
+        <div class="field">
+          <label>API 地址</label>
+          <input id="set-base" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1">
+        </div>
+        <div class="field">
+          <label>模型名</label>
+          <input id="set-model" placeholder="qwen-plus">
+        </div>
+        <div class="field">
+          <label>API Key</label>
+          <input id="set-key" type="password" placeholder="sk-...">
+        </div>
+        <div class="field">
+          <label>识图模型</label>
+          <input id="set-vision" placeholder="qwen3-vl-plus">
+          <div class="field-tip">发图片提问时会用这个视觉模型（普通模型看不懂图）。留空则用 qwen3-vl-plus。</div>
+        </div>
+        <div class="field">
+          <label>连接测试</label>
+          <div class="test-row">
+            <button class="btn" id="btn-test-api">🔌 测试 API 能否使用</button>
+            <span class="test-result" id="test-result">用上面填的地址 / 模型名 / Key 真实请求一次，不用先保存</span>
+          </div>
+        </div>
+        <div class="field">
+          <label>转写环境（抓取课程时把语音转成文字）</label>
+          <div class="test-row">
+            <button class="btn" id="btn-setup-transcribe">🧩 安装 / 修复转写环境</button>
+            <span class="test-result" id="transcribe-status">正在检查…</span>
+          </div>
+          <div class="field-tip">
+            点一次就自动装好（约 200MB 组件 + 1.6GB 模型，只需装一次）。不装的话，「课程日志」抓取会停在转写那一步。
+          </div>
+        </div>
+      </div>
+      <div class="modal-foot">
+        <button class="btn" id="btn-cancel-settings">取消</button>
+        <button class="btn primary" id="btn-save-settings">保存</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 转写环境安装进度 -->
+  <div class="modal-mask" id="modal-setup" hidden>
+    <div class="modal wide">
+      <div class="modal-head">安装转写环境</div>
+      <div class="modal-sub">
+        正在自动下载并安装，首次大约 5～20 分钟（取决于网速）。过程中可以最小化窗口，但不要关掉它。
+      </div>
+      <pre class="setup-log" id="setup-log"></pre>
+      <div class="modal-foot">
+        <span class="test-result" id="setup-result"></span>
+        <span class="spacer"></span>
+        <button class="btn" id="btn-close-setup">关闭</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script></body>
+</html>

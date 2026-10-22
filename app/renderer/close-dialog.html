@@ -1,0 +1,47 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>关闭设置</title>
+<style>
+  body { font: 14px/1.7 system-ui, "Microsoft YaHei"; background: #1b1c1f; color: #e8eaed; padding: 20px; margin: 0; }
+  h3 { margin: 0 0 12px; font-size: 15px; }
+  label { display: flex; align-items: center; gap: 8px; padding: 7px 0; cursor: pointer; }
+  input[type=radio], input[type=checkbox] { cursor: pointer; }
+  .box { border: 1px solid #33363b; border-radius: 10px; padding: 12px 14px; margin-bottom: 16px; }
+  .btns { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; }
+  button { padding: 7px 16px; border-radius: 8px; border: 1px solid #33363b; background: #2a2c31; color: #e8eaed; font: inherit; cursor: pointer; }
+  button.primary { background: #4d6bfe; border-color: #4d6bfe; color: #fff; }
+</style>
+</head>
+<body>
+  <h3>关闭设置</h3>
+  <div class="box">
+    <label><input type="radio" name="act" value="tray" checked> 最小化到托盘，不退出客户端</label>
+    <label><input type="radio" name="act" value="quit"> 退出程序</label>
+    <label><input type="checkbox" id="remember"> 保存设置，不再提醒</label>
+  </div>
+  <h3>其他设置</h3>
+  <div class="box">
+    <label><input type="checkbox" id="autostart"> 开机时自动启动</label>
+  </div>
+  <div class="btns">
+    <button onclick="done(false)">取消</button>
+    <button class="primary" onclick="done(true)">确定</button>
+  </div>
+  <script>
+    function done(ok) {
+      const act = document.querySelector('input[name=act]:checked').value
+      const remember = document.getElementById('remember').checked
+      const autostart = document.getElementById('autostart').checked
+      if (window.closeDialog) {
+        window.closeDialog.submit(ok ? { act, remember, autostart } : null)
+      } else {
+        window.close()
+      }
+    }
+    // Esc 等价于取消
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape') done(false) })
+  </script>
+</body>
+</html>

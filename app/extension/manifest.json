@@ -1,0 +1,28 @@
+{
+  "manifest_version": 3,
+  "name": "学习通学伴",
+  "version": "0.2.0",
+  "description": "把正在看的学习通网课内容交给「学习通学伴」应用，由 AI 整理成课程日志。不上传任何内容到云端。",
+  "permissions": ["scripting", "storage", "tabs"],
+  "host_permissions": [
+    "http://127.0.0.1/*",
+    "http://localhost/*",
+    "*://*.chaoxing.com/*",
+    "*://*.xuexitong.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["*://*.chaoxing.com/*", "*://*.xuexitong.com/*"],
+      "js": ["content.js", "focus-mode.js", "ask-panel.js"],
+      "run_at": "document_idle",
+      "all_frames": true
+    }
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "学习通学伴"
+  }
+}
