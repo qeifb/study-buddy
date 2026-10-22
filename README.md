@@ -53,6 +53,12 @@
 
 ![抓取课程](docs/screenshots/03-capture.png)
 
+在浏览器里加载扩展的样子（`edge://extensions`，左下「开发人员模式」打开后右上角会出现「加载解压缩的扩展」）：
+
+![加载扩展](docs/screenshots/04-edge-extensions.png)
+
+> 图里只保留了「学习通学伴」这一项，其他扩展为了隐私做了遮挡。
+
 ---
 
 ## 关于隐私：它会碰到哪些数据
@@ -119,6 +125,10 @@ git clone https://github.com/qeifb/study-buddy.git E:\study-buddy
 4. 点 **加载解压缩的扩展 / Load unpacked**
 5. 选择文件夹：`E:\study-buddy\app\extension`（**注意是 extension 这一层，不是 app 这一层**）
 6. 看到列表里出现「学习通学伴」就成功了
+
+![加载解压缩的扩展](docs/screenshots/04-edge-extensions.png)
+
+> 关键是两处：左下角 **开发人员模式** 开关要打开，右上角才会出现 **加载解压缩的扩展** 按钮。图里其他扩展做了遮挡。
 
 > 装完后，扩展图标可能不显示在工具栏。点地址栏右边的拼图图标 → 找到「学习通学伴」→ 点图钉固定。
 
