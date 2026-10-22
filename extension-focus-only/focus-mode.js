@@ -131,8 +131,37 @@
 
   /* ───────── 主循环 ───────── */
 
+  /**
+   * 页面上是否已经有「完整版学习通学伴」的扩展在工作。
+   * 判据：它的 content.js 会创建 #__studybuddy_badge 角标。
+   *
+   * 为什么需要这个：用户可能先只装了本扩展（防暂停），后来又想用完整应用。
+   * 那时候两个扩展都会注入本脚本，各跑一份续播循环 —— 虽然结果一样，
+   * 但会出现两个角标、两次 play() 调用。这里让它自动让位：
+   * 一旦发现完整版在场，自己就停手、把自己的角标也收起来。
+   */
+  function mainExtensionPresent() {
+    return Boolean(document.getElementById('__studybuddy_badge'))
+  }
+
+  let yielded = false
+  function hideOwnBadge() {
+    const own = document.getElementById('__sb_focus_host')
+    if (own) own.style.display = 'none'
+  }
+  function showOwnBadge() {
+    const own = document.getElementById('__sb_focus_host')
+    if (own) own.style.display = ''
+  }
+
   function tick() {
     if (isOff()) return
+    // 完整版在场 → 让位，不重复续播
+    if (mainExtensionPresent()) {
+      if (!yielded) { yielded = true; hideOwnBadge() }
+      return
+    }
+    if (yielded) { yielded = false; showOwnBadge() }
     let v = null
     try { v = findVideo() } catch { return }
     if (!v) return
@@ -188,6 +217,8 @@
   }
 
   function attachKillSwitch() {
+    // 完整版在场时不必再挂按钮（它自己会挂一个）
+    if (yielded || mainExtensionPresent()) return
     const badge = ensureKillSwitchHost()
     if (!badge || badge.querySelector('.__sb_focus_btn')) return
 
