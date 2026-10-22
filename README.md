@@ -156,7 +156,7 @@ git clone https://github.com/qeifb/study-buddy.git E:\study-buddy
 启动学习通学伴.cmd
 ```
 
-首次运行会自动做两件事：装依赖（`npm install`，约 1~3 分钟，需要联网）、**在桌面创建「学习通学伴」快捷方式**。之后每次直接双击桌面上的图标就能启动，不用再跑这个 cmd。
+首次运行会自动做三件事：装依赖（`npm install`）、下载 Electron 运行时（约 230MB，脚本里已把下载源指到国内镜像，通常 20 秒内完成）、**在桌面创建「学习通学伴」快捷方式**。整体约 1~3 分钟。之后每次直接双击桌面上的图标就能启动，不用再跑这个 cmd。
 
 > 如果桌面上没出现快捷方式（比如你的桌面被 OneDrive 接管了），手动跑一次仓库根目录的 `create-shortcut.ps1` 即可：右键 →「使用 PowerShell 运行」。
 
@@ -164,9 +164,12 @@ git clone https://github.com/qeifb/study-buddy.git E:\study-buddy
 
 ```bash
 cd /d E:\study-buddy\app
-npm install      # 只有第一次需要
+npm install                             # 只有第一次需要
+node node_modules\electron\install.js   # 必须！Electron 43 起不再自动下载运行时
 npm start
 ```
+
+> 从 Electron 43 开始，`npm install` 只装 JS 部分，**桌面运行时（那个 230MB 的 electron.exe）要显式跑一次 `node node_modules\electron\install.js`**。上面那个 cmd 已经帮你处理了，手动装的人才需要自己跑。
 
 启动成功后会出现一个深色窗口，标题是「学习通学伴」。
 
@@ -258,6 +261,17 @@ npm start
 ---
 
 ## 常见问题
+
+**Q：双击 `启动学习通学伴.cmd` 后停在「正在下载 Electron 运行时」，或者报下载失败？**
+
+那个 230MB 的 `electron.exe` 没下来。脚本已经默认把下载源指向国内镜像（npmmirror），但如果你开着代理、或者网络有额外限制，仍可能失败。手动重试：
+
+```bash
+cd /d E:\study-buddy\app\node_modules\electron
+node install.js
+```
+
+还不行就关掉代理、换个网络再试。这一步只需成功一次，之后 `node_modules\electron\dist\electron.exe` 会一直存在（约 230MB）。
 
 **Q：扩展图标上显示「未连接」，或应用里看不到浏览器页面？**
 A：顺序反了。先启动应用（`启动学习通学伴.cmd`），再刷新学习通页面。扩展每 2 秒会向本机 `127.0.0.1:39517` 发一次心跳。
