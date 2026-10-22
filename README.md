@@ -108,14 +108,24 @@
 
 ### 第 2 步：下载本项目
 
-**方式 A（推荐，不用装 git）**
+**方式 A（推荐）：从 Releases 下载打包好的压缩包**
 
-1. 打开本项目的 GitHub 页面
-2. 点右上角绿色的 **Code** 按钮 → **Download ZIP**
+1. 打开 <https://github.com/qeifb/study-buddy/releases/latest>
+2. 在页面下方的 **Assets** 里点 **`study-buddy.zip`** 下载
 3. 解压到一个**路径里没有中文、没有空格**的地方，例如 `E:\study-buddy`
 4. 确认解压后能看到这三个文件夹：`app`、`tools`、`docs`
 
-**方式 B（会用 git 的话）**
+> Releases 页面每个版本的说明里都写了该版本 zip 的 SHA256，下载后可以按[官方地址与防伪](#官方地址与防伪)那一节的方法核对。
+
+**方式 B：从仓库首页下载源码 ZIP**
+
+1. 打开 <https://github.com/qeifb/study-buddy>
+2. 点右上角绿色的 **Code** 按钮 → **Download ZIP**
+3. 后面同上：解压到 `E:\study-buddy`
+
+> 两种方式内容完全一样，都是源码，首次启动都会自动 `npm install`。区别只是 Releases 里的包带版本号和校验值，适合不想自己找按钮的人。
+
+**方式 C（会用 git 的话）**
 
 ```bash
 git clone https://github.com/qeifb/study-buddy.git E:\study-buddy
@@ -289,8 +299,7 @@ study-buddy/
 │   │   ├── launcher.js      启动带调试端口的浏览器（可选的抓取方式）
 │   │   ├── browsers.js      发现本机浏览器与端口
 │   │   ├── paths.js         数据目录探测（便携式，跟着程序走）
-│   │   ├── probe-dirs.js    启动自检
-│   │   └── windows.js       枚举可见窗口（Win32）
+│   │   └── probe-dirs.js    启动自检
 │   ├── extension/           浏览器扩展（Manifest V3）
 │   │   ├── manifest.json
 │   │   ├── background.js    Service Worker：执行抓取任务
