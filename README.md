@@ -141,33 +141,47 @@
 
 整个过程大约 **15 分钟**（不含模型下载时间）。建议装到 **非系统盘**（比如 `E:\study-buddy`），因为转写模型有 1.6GB。
 
-### 第 1 步：不用装任何东西（Node.js 会自动准备）
+### 第 1 步：不用装任何东西（Node.js 和 Python 都会自动准备）
 
-**这一步现在什么都不用做。**
+**这一步什么都不用做。**
 
-应用需要 Node.js，但 `启动学习通学伴.cmd` 会**自动检查并准备**：
+应用需要 Node.js 和 Python，但 `启动学习通学伴.cmd` 会**自动检查并准备两者**：
 
-- 如果你电脑里已经有 Node.js → 直接用
-- 如果本目录内已有便携版 → 直接用（第二次启动会走这里，**0.7 秒开**）
-- 如果都没有 → **自动下载便携版 Node.js（约 36MB）**
+| 依赖 | 有就用 | 没有就 |
+| --- | --- | --- |
+| **Node.js** | 用你电脑里的 | 自动下载便携版（36MB） |
+| **Python** | 用你电脑里的 | 自动下载便携版（44MB） |
+| **项目依赖** | — | 自动 `npm install` |
+| **Electron 运行时** | — | 自动下载（230MB） |
 
-下载的便携版 `Node.js`：
+下载的便携版都**只解压到程序目录内**：
 
-- 只解压到程序目录下的 `runtime\node\`，**不装进系统**
-- **不写注册表、不需要管理员权限、不弹 UAC**
-- 不改你电脑的 PATH 环境变量
+- `runtime\node\` — 便携版 Node.js
+- `tools\python\` — 便携版 Python
+- `tools\pyenv\` — 独立虚拟环境（不影响系统里其他 Python 项目）
 
-> 首次运行全过程约 **1~2 分钟**（含下载 Node 36MB + Electron 运行时 230MB）。
-> 期间会有进度提示，不要关窗口。
+**不装进系统、不写注册表、不需要管理员权限、不弹 UAC、不改 PATH。**
 
-**如果你更想自己装 Node.js**（也可以，装了就会优先用你系统的）：
+> 首次运行全过程约 **2~4 分钟**（Node 36MB + Electron 230MB）。
+> 之后启动**只要 0.7 秒**（都复用本地）。
 
-1. 打开 <https://nodejs.org/zh-cn>
-2. 下载 **LTS 版本**，双击 `.msi` 一路 Next
-3. **装完要重启电脑**（否则命令窗口拿不到新的 PATH）
-4. 验证：`Win + R` → 输入 `cmd` → 输入 `node -v`，能看到 `v20` 以上
+#### 关于语音模型（1.6GB）
 
-> 遇到下载失败也别慌：脚本会给出**手动下载的备选方案**（版本号、下载地址、解压到哪个目录都写清楚了）。
+转写需要下载语音识别模型，约 **1.6GB**。因为体积大，脚本会**问你一次**：
+
+```
+现在准备转写环境吗？输入 Y 回车=现在装，直接回车=跳过:
+```
+
+- 输入 **Y** → 下载 Python + faster-whisper + 模型（10~30 分钟）
+- 直接**回车** → 跳过，应用仍能启动，之后可双击 `tools\setup-transcribe.ps1` 补装
+
+> 不装转写环境的话，「抓课程日志 / 自动答题」会提示找不到环境，但应用其余功能正常。
+
+#### 如果你更想自己装
+
+**Node.js**：<https://nodejs.org/zh-cn> 下 LTS 版，装完**重启电脑**。
+**Python**：<https://www.python.org/downloads/windows/> 下 3.10~3.13，装时勾选「Add python.exe to PATH」，装完**重启电脑**。
 
 ### 第 2 步：下载本项目
 
@@ -449,7 +463,7 @@ study-buddy/
 │   └── assets/              图标
 ├── tools/
 │   ├── transcribe.py        语音识别脚本（faster-whisper）
-│   ├── setup-transcribe.ps1 一键安装转写环境
+│   ├── setup-transcribe.ps1 一键安装转写环境（会自动装便携版 Python）
 │   ├── build-font-table.mjs 生成字体映射表（题库解码用）
 │   └── check-extension.mjs  扩展合规自检
 ├── docs/screenshots/        文档截图
@@ -465,7 +479,8 @@ data/
 ├── chats.json           对话记录
 ├── course-logs/         课程文字稿（.md，带 [分:秒] 时间戳）
 └── app.log              运行日志（超过 1MB 自动轮转）
-runtime/                 应用自己的浏览器缓存
+runtime/                 便携版 Node.js 与各类缓存（自动下载）
+tools/python/            便携版 Python（系统没装时自动下载）
 tools/pyenv/             Python 虚拟环境
 tools/models/            语音识别模型（1.6GB）
 ```

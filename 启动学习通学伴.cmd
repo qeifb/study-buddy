@@ -15,6 +15,8 @@ set "NODE_DIR=%~dp0runtime\node"
 set "TEMP_DIR=%~dp0runtime\temp"
 set "NPM_CACHE=%~dp0runtime\npm-cache"
 set "EL_CACHE=%~dp0runtime\electron-cache"
+set "PYENV_EXE=%~dp0tools\pyenv\Scripts\python.exe"
+set "TRANSCRIBE_PS1=%~dp0tools\setup-transcribe.ps1"
 set "NODE_VERSION=v24.22.1"
 set "NODE_MIRROR=https://npmmirror.com/mirrors/node"
 set "NODE_ZIP=node-v24.22.1-win-x64.zip"
@@ -147,6 +149,62 @@ if not exist "node_modules\electron\dist\electron.exe" (
 )
 
 if not exist "node_modules\electron\dist\electron.exe" goto electron_failed
+
+rem ================== 第 3.5 步：转写环境（可选） ==================
+rem
+rem 转写环境用来把视频语音转成文字稿（课程日志 / 自动答题要用）。
+rem 它需要 Python + faster-whisper + 语音模型（模型约 1.6GB）。
+rem 因为体积大、耗时长，这里不强制自动装，而是询问一次。
+
+if exist "%PYENV_EXE%" goto transcriber_ready
+
+echo.
+echo   ------------------------------------------------------------
+echo   [可选] 转写环境尚未准备
+echo.
+echo   它用于把课程视频的语音转成文字稿（AI 答题要用）。
+echo   需要下载语音模型约 1.6GB，首次约 10-30 分钟。
+echo.
+echo   跳过也可以：应用能正常启动，只是「抓课程日志 / 自动答题」
+echo   会提示找不到转写环境。之后随时可双击
+echo   tools\setup-transcribe.ps1 单独补装。
+echo   ------------------------------------------------------------
+echo.
+set "SB_ANS="
+set /p SB_ANS=  现在准备转写环境吗？输入 Y 回车=现在装，直接回车=跳过: 
+if /i "%SB_ANS%"=="Y" goto install_transcriber
+echo.
+echo   已跳过。之后如需使用，双击 tools\setup-transcribe.ps1 即可。
+echo.
+goto transcriber_ready
+
+:install_transcriber
+echo.
+echo   正在准备转写环境，会下载 Python、依赖和模型，请耐心等待...
+echo.
+if not exist "%TRANSCRIBE_PS1%" goto transcriber_no_ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File "%TRANSCRIBE_PS1%"
+if errorlevel 1 goto transcriber_failed
+echo.
+echo   转写环境已就绪。
+echo.
+goto transcriber_ready
+
+:transcriber_no_ps1
+echo   [失败] 找不到 tools\setup-transcribe.ps1，压缩包可能不完整。
+echo.
+pause
+goto transcriber_ready
+
+:transcriber_failed
+echo.
+echo   [注意] 转写环境准备失败。应用仍可启动，但抓日志会不可用。
+echo   可稍后重试：双击 tools\setup-transcribe.ps1
+echo.
+pause
+goto transcriber_ready
+
+:transcriber_ready
 
 rem ================== 第 4 步：创建快捷方式 ==================
 
