@@ -109,14 +109,31 @@
       return
     } catch { /* 落到 ② */ }
 
-    // ② 静音 play → 稍后恢复声音（浏览器自动播放策略的标准绕法）
+    // ② 静音 play —— 但**绝不再自动取消静音**
+    //
+    // ⚠️⚠️ 2026-10-24 用户本机实测报错：
+    //   "Unmuting failed and the element was paused instead because the user
+    //    didn't interact with the document before."
+    //
+    // 原逻辑（错的）：静音 play 成功后，300ms 后把 muted 设回 false。
+    // 浏览器自动播放策略：无用户手势时允许**静音**播放，一旦有声就**强制暂停**并抛这个错。
+    // 而本扩展每隔一段时间轮询「有没有暂停」，于是形成死循环：
+    //   播 → 取消静音被暂停 → 检测到暂停 → 再播 → 再取消静音…
+    // 结果**视频永远播不动**，浏览器错误页堆满红色报错。
+    //
+    // 现在的策略：无手势时静音就保持静音，声音交给用户自己在播放器上开。
+    //   宁可静音播完（学习通按观看时长算进度，不要求有声），也不要被反复暂停。
     const wasMuted = v.muted
+    let hasGesture = false
+    try { hasGesture = Boolean(navigator.userActivation && navigator.userActivation.isActive) } catch { /* ignore */ }
+
     try {
-      v.muted = true
+      if (!hasGesture) v.muted = true
       await v.play()
       resumeCount++
-      setTimeout(() => { try { if (!wasMuted) v.muted = false } catch { /* ignore */ } }, 300)
-      if (resumeCount <= 3 || resumeCount % 20 === 0) flashTip(`▶ 已续播（第 ${resumeCount} 次，静音启动）`)
+      if (resumeCount <= 3 || resumeCount % 20 === 0) {
+        flashTip(hasGesture ? `▶ 已续播（第 ${resumeCount} 次）` : `▶ 已续播（第 ${resumeCount} 次，静音）`)
+      }
       return
     } catch (e) {
       try { v.muted = wasMuted } catch { /* ignore */ }

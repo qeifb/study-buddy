@@ -1452,21 +1452,55 @@
 
   const playMon = { lastTime: -1, stall: 0, stalled: false }
 
+  /**
+   * 这张卡片只做「恢复播放」，绝不擅自改音量。
+   *
+   * ⚠️⚠️ 2026-10-24 用户本机实测报错：
+   *   "Unmuting failed and the element was paused instead because the user didn't
+   *    interact with the document before."
+   *   堆栈指向 auto-pilot.js:1463 —— 就是下面原来那句「300ms 后取消静音」。
+   *
+   * 原逻辑（错的）：
+   *   v.muted = true → await v.play() → 300ms 后 v.muted = false
+   *
+   * 为什么错：浏览器自动播放策略规定「无用户手势时允许静音播放，
+   *   但不允许有声播放」。所以刚 play() 成功，一取消静音就被浏览器**强制暂停**并报错。
+   *   更糟的是：视频被暂停 → 主循环判定「没在播」→ 再次 ensurePlaying →
+   *   再静音→再播放→再取消静音→再被暂停 ⇒ **无限循环，视频永远播不动**。
+   *
+   * 现在的策略：
+   *   ① 只在「确实无法播放」时才临时静音，用来绕过自动播放拦截；
+   *   ② **不再自动取消静音**——静音就一直静音，由用户自己决定要不要开声音；
+   *   ③ 若页面已有用户手势（userActivation.isActive），说明是用户点的播放，
+   *      直接 play() 即可，根本不需要静音。
+   */
   async function ensurePlaying() {
     const v = findVideo()
     if (!v) return false
     if (!v.paused && !v.ended) return true
+
+    // 页面已有用户激活（用户点过页面任意处）→ 浏览器允许有声自动播放，不需要静音
+    let hasGesture = false
     try {
-      const wasMuted = v.muted
-      v.muted = true
+      hasGesture = Boolean(navigator.userActivation && navigator.userActivation.isActive)
+    } catch { /* ignore */ }
+
+    try {
+      if (!hasGesture && !v.muted) {
+        // 无手势且当前有声 → 先静音才能播（浏览器策略要求）
+        v.muted = true
+        LOG('无用户手势，临时静音以允许播放（不会自动取消静音）')
+        // 记下是我们静音的，方便下次仍保持静音
+        try { v.dataset.sbMutedByUs = '1' } catch { /* ignore */ }
+      }
       await v.play()
-      setTimeout(() => { try { if (!wasMuted) v.muted = false } catch { /* ignore */ } }, 300)
       return true
     } catch (e) {
       LOG('play 失败', e?.message)
       // 可能是弹题挡着
       if (findQuizMask()) return false
-      flash('浏览器拦截了自动播放，请点一下播放按钮', 'warn')
+      // 静音也播不了 → 才是真的被拦，提示用户点一下
+      flash('浏览器拦截了自动播放，请先点一下页面任意处或播放按钮', 'warn')
       return false
     }
   }
