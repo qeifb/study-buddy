@@ -140,12 +140,24 @@ if (dirty) {
 
 // ── 2. 打包函数 ──
 function buildZip(files, outName, baseDir, label) {
+  // baseDir 可以是单个目录，也可以是「多个候选目录」数组——
+  // 离线版需要把 repo/（源码）与 <root>/tools/models（模型）拼在一起。
+  const bases = Array.isArray(baseDir) ? baseDir : [baseDir]
   const stage = path.join(ROOT, '__stage_' + Date.now())
   fs.rmSync(stage, { recursive: true, force: true })
+  let missing = []
   for (const f of files) {
+    const src = bases.map((b) => path.join(b, f)).find((p) => fs.existsSync(p))
+    if (!src) { missing.push(f); continue }
     const dst = path.join(stage, f)
     fs.mkdirSync(path.dirname(dst), { recursive: true })
-    fs.copyFileSync(path.join(baseDir, f), dst)
+    fs.copyFileSync(src, dst)
+  }
+  if (missing.length) {
+    console.error('❌ 打包缺少文件（在所有候选目录里都没找到）:')
+    missing.slice(0, 10).forEach((x) => console.error('   ' + x))
+    fs.rmSync(stage, { recursive: true, force: true })
+    process.exit(1)
   }
 
   const zipPath = path.join(DIST, outName)
@@ -210,6 +222,61 @@ function verifyZip(zipName, expect) {
   console.log(`--- ${zipName} ---`)
   console.log(`  条目数: ${entries.length}（期望 ${expect.count}）${entries.length === expect.count ? ' ✅' : ' ❌'}`)
 
+  // ═══════════════════════════════════════════════════════════════════
+  // ★ 产物级敏感数据闸门（2026-10-25 因用户报「能看到我的 API 配置」而加）
+  // 检查的是**最终 zip 产物**，不是 repo 源目录——两者不等价。
+  // 命中任何用户数据就直接失败，绝不发布。
+  // ═══════════════════════════════════════════════════════════════════
+  {
+    // ★ 用「任意层级」匹配（/? 而不是 ^），否则 app/data/settings.json、
+  //   tools/models/x/model.bin 这类带前缀的会漏掉（上一版实测 11 个用例漏 4 个）。
+  const SENSITIVE = [
+    [/(^|\/)data\//, 'data 目录（settings/chats/course-logs/app.log）'],
+    [/(^|\/)settings\.json$/, '用户设置（含明文 API Key）'],
+    [/(^|\/)chats\.json$/, '聊天记录'],
+    [/(^|\/)quiz-evidence\.json$/, '答题依据留档'],
+    [/(^|\/)app\.log$/, '应用日志（可能含用户提问原文）'],
+    [/(^|\/)course-logs\//, '课程文字稿'],
+    [/(^|\/)runtime\//, 'Electron userData'],
+    [/(^|\/)browser-profile\//, '浏览器登录态'],
+    [/(^|\/)node_modules\//, '依赖'],
+    [/(^|\/)pyenv\//, 'Python 虚拟环境'],
+    // models/ 仅在离线版允许（expect.allowModels）
+    ...(expect.allowModels ? [] : [[/(^|\/)models\//, '语音模型']]),
+    [/(^|\/)electron-cache\//, 'Electron 缓存'],
+    [/(^|\/)npm-cache\//, 'npm 缓存'],
+    [/(^|\/)_done\.flag$/, '临时标记文件'],
+    [/(^|\/)node-download\.zip$/, '下载的安装包'],
+  ]
+    console.log('')
+    console.log('--- 产物级敏感数据检查（硬闸门）---')
+    const hitNames = []
+    const ALLOW = expect.allow || []
+    for (const e of entries) {
+      if (ALLOW.some((re) => re.test(String(e.name || e).replace(/\\/g, '/')))) continue
+      const n = String(e.name || e).replace(/\\/g, '/')
+      for (const [re] of SENSITIVE) { if (re.test(n)) { hitNames.push(n); break } }
+    }
+    if (hitNames.length) {
+      console.log('  ❌ 混入用户数据/生成物:')
+      hitNames.slice(0, 20).forEach((x) => console.log('       ' + x))
+      console.log('')
+      console.log('  【严重】这会把开发者本机配置（含明文 API Key）泄露给所有下载者。')
+      console.log('  请检查收集白名单后重试。')
+      process.exit(1)
+    }
+    // ★ 动态文案：不能硬编码「无 xxx」，否则离线版含 models/ 时也是这句，误导人
+    {
+      const hasModels = entries.some((e) => /(^|\/)models\//.test(String(e.name || e).replace(/\\/g, '/')))
+      console.log('  ✅ 无 data/ settings.json chats.json quiz-evidence.json app.log')
+      console.log('  ✅ 无 runtime/ browser-profile/ node_modules/ pyenv/')
+      console.log(hasModels
+        ? '  ✅ 含 models/（离线版特性，已在 allow 白名单内放行）'
+        : '  ✅ 无 models/')
+    }
+  }
+
+
   let ok = entries.length === expect.count
   for (const m of expect.must) {
     const e = entries.find((x) => x.name === m)
@@ -243,7 +310,88 @@ fs.writeFileSync(path.join(DIST, '_release-meta.json'), JSON.stringify({
   builtAt: new Date().toISOString(),
 }, null, 2), 'utf8')
 
+// ═══════════════════════════════════════════════════════════════════
+// 离线版（模型随包）—— study-buddy-offline.zip
+//
+// 目的：用户不想/不能联网下载 1.5GB 模型时，直接用这个包。
+//
+// ★ 只打模型，不打 pyenv：pyvenv.cfg 里硬编码了开发机基础 Python 的绝对路径
+//   （home = C:\Users\xxx\...\Python314），换机器解压必然失效。
+//   模型是纯数据文件，可以随便搬。
+// ═══════════════════════════════════════════════════════════════════
+console.log('')
+console.log('=== 构建离线版（模型随包）===')
+
+const MODEL_NAME = 'large-v3-turbo'
+// 模型在「运行副本」<root>/tools/models 下（repo/ 故意不含模型，避免进 git）
+// 若该目录不存在，退回到 repo/tools/models（理论上不会有）
+const MODEL_CANDIDATES = [
+  path.join(ROOT, 'tools', 'models', MODEL_NAME),
+  path.join(REPO, 'tools', 'models', MODEL_NAME),
+]
+const modelDir = MODEL_CANDIDATES.find((p) => fs.existsSync(path.join(p, 'model.bin'))) ||
+  MODEL_CANDIDATES[0]
+let offlineMeta = null
+let okOffline = true
+
+if (!fs.existsSync(path.join(modelDir, 'model.bin'))) {
+  console.log('  ⚠️ 跳过：本机没有 ' + path.join(modelDir, 'model.bin'))
+  console.log('     离线版需要开发机先跑过一次转写环境安装。')
+} else {
+  const modelFiles = fs.readdirSync(modelDir).filter((f) => fs.statSync(path.join(modelDir, f)).isFile())
+  let modelBytes = 0
+  for (const f of modelFiles) modelBytes += fs.statSync(path.join(modelDir, f)).size
+  console.log('  模型 ' + MODEL_NAME + ': ' + modelFiles.length + ' 文件  ' + (modelBytes / 1048576).toFixed(0) + 'MB')
+
+  const offlineFiles = [
+    ...mainFiles,
+    ...modelFiles.map((f) => 'tools/models/' + MODEL_NAME + '/' + f),
+  ]
+  console.log('  合计文件: ' + offlineFiles.length)
+
+  // 多数文件来自 repo/，模型来自 <root>/tools/models
+  offlineMeta = buildZip(
+    offlineFiles,
+    'study-buddy-offline.zip',
+    [REPO, ROOT],
+    '离线版（含模型）'
+  )
+
+  // 用同一套 verifyZip，通过 allow 白名单放行 tools/models/
+  okOffline = verifyZip('study-buddy-offline.zip', {
+    count: offlineFiles.length,
+    must: [
+      'tools/models/' + MODEL_NAME + '/model.bin',
+      'tools/models/' + MODEL_NAME + '/tokenizer.json',
+      'tools/transcribe.py',
+      'tools/setup-transcribe.ps1',
+      '启动学习通学伴.cmd',
+    ],
+    mustNot: [/^data\//, /pyenv\//, /node_modules\//, /^runtime\//, /browser-profile\//],
+    allowModels: true,
+    allow: [/(^|\/)models\//],
+  })
+
+  if (!okOffline) {
+    console.log('')
+    console.log('  ❌ 离线版验证失败')
+  }
+}
+
+// ── 6. 汇总 ──
 console.log('')
 console.log('=== 汇总 ===')
-console.log(okMain && okFoc ? '✅ 两个包都验证通过' : '❌ 有问题')
-process.exit(okMain && okFoc ? 0 : 1)
+console.log(okMain ? '  ✅ study-buddy.zip（无模型版）' : '  ❌ study-buddy.zip 验证失败')
+console.log(okFoc ? '  ✅ study-buddy-focus-only.zip（仅防暂停）' : '  ❌ study-buddy-focus-only.zip 验证失败')
+if (offlineMeta) {
+  console.log(okOffline
+    ? '  ✅ study-buddy-offline.zip（模型随包版）'
+    : '  ❌ study-buddy-offline.zip 验证失败')
+} else {
+  console.log('  ⚠️ study-buddy-offline.zip 未生成（本机无模型文件）')
+}
+
+const allOk = okMain && okFoc && okOffline
+console.log('')
+console.log(allOk ? '✅ 全部通过' : '❌ 有问题')
+process.exit(allOk ? 0 : 1)

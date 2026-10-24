@@ -42,20 +42,48 @@ const DEFAULTS = {
   ].join('\n'),
 }
 
+/**
+ * 读取设置。
+ *
+ * ★ 2026-10-25 安全修正：旧位置兜底（LEGACY_SETTINGS）改为**受控迁移**。
+ *
+ * 背景：用户反馈「把 zip 发给别人，别人打开还能看到我的 API 地址配置」。
+ * 虽然发布的 zip 里没有任何 settings.json（已验证），但这个兜底逻辑会
+ * **凭空去读 %APPDATA%\study-buddy\study-buddy\settings.json** ——
+ * 只要那台机器上曾经装过旧版本，就会读到**上一任使用者留下的配置**。
+ * 这对「分发 zip 给他人」是很危险的默认行为。
+ *
+ * 新规则：
+ *   ① 新位置有配置 → 直接用它（这是用户自己的，绝不覆盖）
+ *   ② 新位置没有，且旧位置存在 → 迁移一次（说明是本机老用户升级），
+ *      迁移成功后写一个 .migrated 标记，之后不再检查
+ *   ③ 都没有 → 纯默认值（全新用户的正确状态）
+ *
+ * 这样「全新解压」永远得到干净默认值；「老用户升级」仍能保住配置。
+ */
 function readSettings() {
-  // ① 优先新位置（Local）
+  // ① 新位置优先（这是用户自己的配置，绝不覆盖）
   try {
     const j = JSON.parse(fs.readFileSync(SETTINGS, 'utf8'))
     return { ...DEFAULTS, ...j }
-  } catch { /* 落到旧位置 */ }
+  } catch { /* 继续看旧位置 */ }
 
-  // ② 兼容：旧版在 Roaming，读到就顺手搬到新位置
-  try {
-    const j = JSON.parse(fs.readFileSync(LEGACY_SETTINGS, 'utf8'))
-    const merged = { ...DEFAULTS, ...j }
-    try { writeSettings(merged) } catch { /* ignore */ }
-    return merged
-  } catch { /* 都没有 */ }
+  // ② 旧位置迁移：仅当「没迁移过 且 旧文件真的存在」
+  const MIGRATED_FLAG = SETTINGS + '.migrated'
+  let migrated = false
+  try { migrated = fs.existsSync(MIGRATED_FLAG) } catch { /* ignore */ }
+  if (!migrated) {
+    try {
+      const raw = fs.readFileSync(LEGACY_SETTINGS, 'utf8')
+      const j = JSON.parse(raw)
+      const merged = { ...DEFAULTS, ...j }
+      // 先备份旧文件，再写新位置，最后打标记（任一步失败都不影响可用性）
+      try { fs.writeFileSync(SETTINGS + '.from-legacy.bak', raw, 'utf8') } catch { /* ignore */ }
+      try { writeSettings(merged) } catch { /* ignore */ }
+      try { fs.writeFileSync(MIGRATED_FLAG, new Date().toISOString(), 'utf8') } catch { /* ignore */ }
+      return merged
+    } catch { /* 旧位置也没有 */ }
+  }
 
   return { ...DEFAULTS }
 }

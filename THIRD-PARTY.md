@@ -34,7 +34,10 @@
   约 44MB，解压后用 Windows 自带 `tar.exe -xzf`，解压出的顶层目录就叫 `python/`。
 - **不写注册表、不装系统、不需要管理员权限。**
 
-## 语音模型（tools/models/，运行时自动下载，不随仓库分发）
+## 语音模型（tools/models/，运行时自动下载或随 offline 版分发）
+
+> **分发方式**：标准版 `study-buddy.zip` 不含模型（运行时下载）；
+> `study-buddy-offline.zip` **内置模型**，方便网络不稳的用户。两者许可一致。
 
 - **来源**：HuggingFace 仓库 `Systran/faster-whisper-<模型名>`
 - **许可**：模型各自遵循其原始许可（faster-whisper 系列为 MIT）
