@@ -8,7 +8,13 @@ import crypto from 'node:crypto'
 const token = execFileSync('gh', ['auth', 'token'], { encoding: 'utf8' }).trim()
 const env = { ...process.env, GH_TOKEN: token }
 const REPO = 'qeifb/study-buddy'
-const TAG = 'v0.3.2'
+// TAG 不再写死（曾因写死 v0.3.2 导致发布 v0.3.3 后仍验证旧包）
+const TAG = process.argv[2] || (() => {
+  try {
+    const meta = JSON.parse(fs.readFileSync('E:/StudyBuddy/dist/_release-meta.json', 'utf8'))
+    return meta.tag || meta.version || 'latest'
+  } catch { return 'latest' }
+})()
 const DL = 'E:/StudyBuddy/__rel'
 fs.rmSync(DL, { recursive: true, force: true })
 fs.mkdirSync(DL, { recursive: true })
@@ -21,7 +27,7 @@ function T(n, ok, d) {
   console.log(`  ${ok ? '✅' : '❌'} ${n}${d ? '  ' + d : ''}`)
 }
 
-console.log('=== 1. Release 元数据 ===')
+console.log('=== 1. Release 元数据（tag=' + TAG + '）===')
 const rel = JSON.parse(execFileSync('gh', ['api', `repos/${REPO}/releases/tags/${TAG}`], { encoding: 'utf8', env }))
 console.log(`  tag=${rel.tag_name}  draft=${rel.draft}  prerelease=${rel.prerelease}`)
 console.log(`  正文行数=${rel.body.split('\n').length}`)
@@ -81,7 +87,12 @@ const EXT = EX + '/app/extension'
 const extFiles = fs.readdirSync(EXT).filter((f) => fs.statSync(EXT + '/' + f).isFile())
 const mf = JSON.parse(fs.readFileSync(EXT + '/manifest.json', 'utf8'))
 T('app/extension 13 文件', extFiles.length === 13, `${extFiles.length}`)
-T('manifest 版本 0.6.2', mf.version === '0.6.2', mf.version)
+// 版本号不写死，从本地 repo 的 manifest 读期望值（否则每次发版都要改这里）
+const expectVer = (() => {
+  try { return JSON.parse(fs.readFileSync('E:/StudyBuddy/repo/app/extension/manifest.json', 'utf8')).version }
+  catch { return null }
+})()
+T('manifest 版本与本地一致', !expectVer || mf.version === expectVer, 'release=' + mf.version + ' local=' + expectVer)
 T('manifest 名称正确', mf.name === '学习通学伴', mf.name)
 T('无 _ 开头文件名', !extFiles.some((f) => f.startsWith('_')))
 T('含 font-table.js', extFiles.includes('font-table.js'))
@@ -114,6 +125,11 @@ tools.forEach((f) => console.log(`    ${f}  ${(fs.statSync(EX + '/tools/' + f).s
 T('tools 含 transcribe.py', tools.includes('transcribe.py'))
 T('tools 含 setup-transcribe.ps1', tools.includes('setup-transcribe.ps1'))
 T('无临时脚本（_ 开头）', !tools.some((f) => f.startsWith('_')))
+// 关键：所有自检脚本都应随包分发，让用户能自己复核
+const MUST_TOOLS = ['check-all.mjs', 'check-encoding.mjs', 'check-manifest-appsync.mjs',
+  'check-readme-consistency.mjs', 'check-secrets.mjs', 'e2e-check.mjs']
+const missingTools = MUST_TOOLS.filter((f) => !tools.includes(f))
+T(`tools 含全部 ${MUST_TOOLS.length} 个自检脚本`, missingTools.length === 0, missingTools.join(', '))
 
 console.log('')
 console.log('=== 汇总 ===')
