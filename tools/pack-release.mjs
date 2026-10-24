@@ -48,17 +48,20 @@ function walk(dir, rel = '', out = []) {
 // ── 1. 完整版文件清单 ──
 const MAIN_TOP = ['app', 'docs', 'tools']
 const MAIN_ROOT_FILES = ['README.md', 'LICENSE', 'THIRD-PARTY.md', 'create-shortcut.ps1', '启动学习通学伴.cmd']
-const TOOLS_ALLOW = [
-  'tools/transcribe.py',
-  'tools/setup-transcribe.ps1',
-  'tools/build-font-table.mjs',
-  'tools/check-extension.mjs',
-  'tools/check-encoding.mjs',
-  'tools/check-manifest-appsync.mjs',
-  'tools/check-readme-consistency.mjs',
-  'tools/check-secrets.mjs',
-  'tools/e2e-check.mjs',
-]
+// ★ 白名单不再手写：自动收录 repo/tools 下所有 .mjs 与指定非脚本文件。
+// 历史教训：手动维护名单漏了 3 次（check-all / pack-release / verify-release），
+// 每次都是打包后才发现 tools 不全。改为自动扫描，永远不会漏。
+const TOOLS_FIXED = ['tools/transcribe.py', 'tools/setup-transcribe.ps1']
+const TOOLS_ALLOW = (() => {
+  const list = [...TOOLS_FIXED]
+  const dir = path.join(ROOT, 'repo', 'tools')
+  if (fs.existsSync(dir)) {
+    for (const f of fs.readdirSync(dir)) {
+      if (f.endsWith('.mjs')) list.push('tools/' + f)
+    }
+  }
+  return [...new Set(list)].sort()
+})()
 
 const allRepoFiles = walk(REPO)
 const mainFiles = allRepoFiles.filter((f) => {
