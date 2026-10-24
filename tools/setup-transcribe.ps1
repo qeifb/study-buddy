@@ -30,7 +30,37 @@ param(
     [string]$PyPiIndex  = 'https://pypi.tuna.tsinghua.edu.cn/simple'
 )
 
+# ⚠️ 关键：进入时保存原控制台编码，退出前恢复。
+# 原因：把 OutputEncoding 改成 UTF-8 后，本脚本退出时**控制台仍是 UTF-8**，
+# 而调用方 启动学习通学伴.cmd 是 GBK（chcp 936），于是它后续的中文全变乱码
+# （用户实测日志里出现 "[ע  ] תд ׼ ʧ ܡ Ӧ  Կ" 这种）。
+# 所以必须保存→恢复，绝不能只设不改回。
+$Script:OldOutEnc = $null
+$Script:OldCp = $null
+try { $Script:OldOutEnc = [Console]::OutputEncoding } catch { }
+try { $Script:OldCp = chcp } catch { }
+
+function Restore-ConsoleEncoding {
+    try { if ($Script:OldOutEnc) { [Console]::OutputEncoding = $Script:OldOutEnc } } catch { }
+    # chcp 输出形如 "Active code page: 936"，提取数字后恢复
+    try {
+        if ($Script:OldCp -match '(\d+)') {
+            $cp = [int]$Matches[1]
+            & chcp $cp > $null 2>&1
+        }
+    } catch { }
+}
+
+# 现在才允许切 UTF-8（让本脚本自己的中文显示正常）
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
+
+# 无论成功/失败/异常退出，都恢复编码
+trap {
+    Restore-ConsoleEncoding
+    Write-Host ""
+    Write-Host ("[异常] " + $_.Exception.Message) -ForegroundColor Red
+    exit 1
+}
 $ErrorActionPreference = 'Stop'
 $ToolsDir = $PSScriptRoot
 $Pyenv     = Join-Path $ToolsDir 'pyenv'
@@ -43,7 +73,7 @@ $PortablePyExe = Join-Path $PortablePyDir 'python.exe'
 function Step($msg) { Write-Host ("[步骤] " + $msg) -ForegroundColor Cyan }
 function Ok($msg)   { Write-Host ("[完成] " + $msg) -ForegroundColor Green }
 function Warn($msg) { Write-Host ("[注意] " + $msg) -ForegroundColor Yellow }
-function Die($msg)  { Write-Host ("[失败] " + $msg) -ForegroundColor Red; exit 1 }
+function Die($msg)  { Write-Host ("[失败] " + $msg) -ForegroundColor Red; Restore-ConsoleEncoding; exit 1 }
 
 Write-Host ""
 Write-Host "===============================================" -ForegroundColor Magenta
@@ -150,22 +180,85 @@ if (Test-Path (Join-Path $ModelDir 'model.bin')) {
     Ok "模型已存在：$ModelDir"
 } else {
     Step "下载识别模型 $Model（1.6GB 左右，取决于网速，可能要十几分钟）"
-    if ($Mirror) {
-        Warn "使用镜像下载：$Mirror"
-        $env:HF_ENDPOINT = $Mirror
-    }
+
+    # ⚠️ 多镜像 + 重试（2026-10-25 用户实测 hf-mirror.com 超时后直接失败）
+    # 单镜像一次失败就放弃太脆弱：国内网络对 hf-mirror 时常不稳。
+    # 策略：候选镜像轮流试，每个试 2 轮，全失败才报错。
+    $mirrors = @()
+    if ($Mirror) { $mirrors += $Mirror }
+    $mirrors += 'https://hf-mirror.com'
+    $mirrors += 'https://huggingface.co'
+    $mirrors = $mirrors | Select-Object -Unique
+
     New-Item -ItemType Directory -Force -Path $ModelDir | Out-Null
     $repo = "Systran/faster-whisper-$Model"
-    $code = @"
+
+    $ok = $false
+    $attempt = 0
+    foreach ($m in $mirrors) {
+        foreach ($round in 1..2) {
+            $attempt++
+            $endpoint = if ($m) { $m } else { 'https://huggingface.co' }
+            Warn "第 $attempt 次尝试（镜像：$endpoint，第 $round 轮）"
+            $env:HF_ENDPOINT = $endpoint
+            # 每次都给足超时，避免网络抖动误判
+            $env:HF_HUB_DOWNLOAD_TIMEOUT = '60'
+
+            $code = @"
+import os
+os.environ.setdefault('HF_HUB_DOWNLOAD_TIMEOUT', '60')
 from huggingface_hub import snapshot_download
-snapshot_download(repo_id='$repo', local_dir=r'$ModelDir')
+snapshot_download(
+    repo_id='$repo',
+    local_dir=r'$ModelDir',
+    resume_download=True,      # 断点续传，中断后不用从头下
+    max_workers=2,             # 并发低一点，减少被限速
+    endpoint=os.environ.get('HF_ENDPOINT') or 'https://huggingface.co',
+)
 print('MODEL_OK')
 "@
-    $tmp = Join-Path $env:TEMP ("sb-dl-" + [guid]::NewGuid().ToString('N') + ".py")
-    Set-Content -Path $tmp -Value $code -Encoding UTF8
-    try { & $PyExe $tmp } finally { Remove-Item $tmp -Force -ErrorAction SilentlyContinue }
-    if ($LASTEXITCODE -ne 0 -or -not (Test-Path (Join-Path $ModelDir 'model.bin'))) {
-        Die "模型下载失败。可以换镜像或重试：.\setup-transcribe.ps1 -Model small（更小的模型）"
+            $tmp = Join-Path $env:TEMP ("sb-dl-" + [guid]::NewGuid().ToString('N') + ".py")
+            Set-Content -Path $tmp -Value $code -Encoding UTF8
+            try {
+                & $PyExe $tmp
+                $exit = $LASTEXITCODE
+            } catch {
+                $exit = 1
+            } finally {
+                Remove-Item $tmp -Force -ErrorAction SilentlyContinue
+            }
+
+            if ($exit -eq 0 -and (Test-Path (Join-Path $ModelDir 'model.bin'))) {
+                $ok = $true
+                break
+            }
+            Warn "这次没成功（退出码 $exit），换下一个镜像/重试..."
+            Start-Sleep -Seconds 3
+        }
+        if ($ok) { break }
+    }
+
+    if (-not $ok) {
+        Die @"
+模型下载失败（已尝试 $attempt 次，换了 $($mirrors.Count) 个镜像）。
+
+常见原因：网络连不上 huggingface（国内常见），或代理不稳定。
+
+请手动处理，四选一：
+  1) 换个时间重试（网络可能只是暂时不通）：
+       .\setup-transcribe.ps1
+  2) 用更小的模型（下载量从 1.6GB 降到约 480MB）：
+       .\setup-transcribe.ps1 -Model small
+  3) 指定你能连通的其他镜像：
+       .\setup-transcribe.ps1 -Mirror https://你的镜像地址
+  4) 手动下载后放到指定目录（推荐网络差的同学）：
+       打开 https://hf-mirror.com/Systran/faster-whisper-$Model
+       下载全部文件，放到：$ModelDir
+       （最终应有 model.bin 等文件）
+
+  注意：不装模型不影响应用启动，只是「抓课程日志」不可用。
+        之后随时可以双击 tools\setup-transcribe.ps1 重试。
+"@
     }
     Ok "模型已下载：$ModelDir"
 }
@@ -185,5 +278,8 @@ if ($LASTEXITCODE -ne 0) { Die "自检失败：模型加载不了。" }
 
 Write-Host ""
 Ok "全部完成！转写环境已就绪。"
+
+# 结束前恢复控制台编码，避免调用方（.cmd）后续中文乱码
+Restore-ConsoleEncoding
 Write-Host "  下次点「课程日志」抓取时，就会自动调用它。" -ForegroundColor Green
 Write-Host ""

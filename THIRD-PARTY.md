@@ -21,6 +21,26 @@
 - **为什么不用自实现**：我曾手写 MD5，与标准实现对照只通过 1/6，会导致映射全部失效；
   blueimp-md5 是成熟实现，且与同类解码脚本所用一致，保证 hash 与映射表匹配。
 
+## 便携版 Python（tools/python/，运行时自动下载，不随仓库分发）
+
+- **来源**：[python-build-standalone](https://github.com/astral-sh/python-build-standalone)（astral-sh 维护）
+- **许可**：Python Software Foundation License（与原版 Python 一致）
+- **用途**：当用户电脑没有 Python 时，自动下载便携版，解压到 `tools\python\`，用于创建转写虚拟环境。
+- **为什么不用官方 embeddable zip**：官方 `python-3.x-embed-amd64.zip` **不带 pip、不支持 venv**（`ensurepip` 与 `venv` 模块被裁剪），无法创建本项目要求的 `tools\pyenv` 虚拟环境。
+- **下载地址模板**：
+  ```
+  https://registry.npmmirror.com/-/binary/python-build-standalone/<版本日期>/cpython-3.12.15+20261021-x86_64-pc-windows-msvc-install_only.tar.gz
+  ```
+  约 44MB，解压后用 Windows 自带 `tar.exe -xzf`，解压出的顶层目录就叫 `python/`。
+- **不写注册表、不装系统、不需要管理员权限。**
+
+## 语音模型（tools/models/，运行时自动下载，不随仓库分发）
+
+- **来源**：HuggingFace 仓库 `Systran/faster-whisper-<模型名>`
+- **许可**：模型各自遵循其原始许可（faster-whisper 系列为 MIT）
+- **用途**：语音转写。默认 `large-v3-turbo` 约 1.6GB。
+- **镜像**：国内默认走 <https://hf-mirror.com>，失败自动切换官方源并重试。
+
 ## app/extension/font-table.js
 
 - **数据来源**：<https://www.forestpolice.org/ttf/2.0/table.json>

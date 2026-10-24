@@ -53,6 +53,11 @@ const TOOLS_ALLOW = [
   'tools/setup-transcribe.ps1',
   'tools/build-font-table.mjs',
   'tools/check-extension.mjs',
+  'tools/check-encoding.mjs',
+  'tools/check-manifest-appsync.mjs',
+  'tools/check-readme-consistency.mjs',
+  'tools/check-secrets.mjs',
+  'tools/e2e-check.mjs',
 ]
 
 const allRepoFiles = walk(REPO)

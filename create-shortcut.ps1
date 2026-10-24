@@ -4,6 +4,17 @@ param(
   [string]$OutPath = ""
 )
 $ErrorActionPreference = 'Stop'
+# 保存原控制台编码，结束时恢复（否则调用方 .cmd 的 GBK 中文会乱码）
+$Script:OldOutEnc2 = $null
+$Script:OldCp2 = $null
+try { $Script:OldOutEnc2 = [Console]::OutputEncoding } catch { }
+try { $Script:OldCp2 = chcp } catch { }
+function Restore-ConsoleEncoding2 {
+    try { if ($Script:OldOutEnc2) { [Console]::OutputEncoding = $Script:OldOutEnc2 } } catch { }
+    try {
+        if ($Script:OldCp2 -match '(\d+)') { & chcp ([int]$Matches[1]) > $null 2>&1 }
+    } catch { }
+}
 try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
 
 if ([string]::IsNullOrWhiteSpace($OutPath)) {
@@ -14,12 +25,14 @@ if ([string]::IsNullOrWhiteSpace($OutPath)) {
 
 if (Test-Path $OutPath) {
   Write-Output "[跳过] 快捷方式已存在：$OutPath"
+  Restore-ConsoleEncoding2;
   exit 0
 }
 
 $exe = Join-Path $AppDir 'node_modules\electron\dist\electron.exe'
 if (-not (Test-Path $exe)) {
   Write-Output "[失败] 找不到 electron.exe，请先让 npm install 跑完"
+  Restore-ConsoleEncoding2;
   exit 1
 }
 
