@@ -16,6 +16,7 @@
 - [界面预览](#界面预览)
 - [关于隐私：它会碰到哪些数据](#关于隐私它会碰到哪些数据)
 - [安装（Windows，零基础）](#安装windows零基础)
+- [一键播放答题](#一键播放答题)
 - [开始使用](#开始使用)
 - [常见问题](#常见问题)
 - [目录结构](#目录结构)
@@ -256,6 +257,45 @@ npm start
 
 ---
 
+## 一键播放答题
+
+> 这个功能和上面的「读课程内容辅助学习」是两条独立的线。
+> 它会在学习通页面上自动播放视频、自动做章节测验。
+> **是否使用由你自己判断**，默认是关闭的，需要你手动点按钮开启。
+
+### 它能做什么
+
+1. **连续自动播放**：看完一节自动切下一节，中途卡住会尝试恢复。
+2. **自动做视频弹题**：播放中弹出的选择题，按课程内容作答并提交，答错会换选项重试。
+3. **自动做章节测验**：抓取本节课文字稿 → 按文字稿作答 → 自动勾选 → 自动提交（含「确认提交」弹窗）。
+4. **严格先看后答**：进入章节先查任务点状态，视频没看完就先播，已看完直接答题——不会重复播放浪费时间。
+5. **不做就不算分，所以绝不空着**：没有明确依据的题也会按上下文推断作答并标「（推测）」，留空等于 0 分。
+
+### 怎么开
+
+1. 打开学习通任意一节的播放页。
+2. 页面右上角会出现「学伴已就绪」小条，**这个小条可以拖动**（双击复位），里面有「▶ 一键播放答题」按钮。
+3. 点一下开始，再点一下停止。
+
+### 字体混淆怎么处理
+
+学习通章节测验页会给题目内联一个特殊字体，让页面文字显示正常但 DOM 里是乱码。
+本项目用**确定性**方式还原，不是靠字形相似度猜：
+
+```
+glyphIndex = Typr.U.codeToGlyph(font, code)
+path       = Typr.U.glyphToPath(font, glyphIndex)
+hash       = md5(JSON.stringify(path)).slice(24)
+真实汉字   = fontTable[hash]
+```
+
+同一个汉字的字形轮廓恒定，所以 MD5 也恒定，一张固定映射表就能 100% 精确还原。
+实测真实题目字体 31/31 全部命中。映射表未命中时会自动回退到字形比对，并在界面标注低置信字。
+
+详见 [THIRD-PARTY.md](THIRD-PARTY.md)。
+
+---
+
 ## 开始使用
 
 ### 抓一节课的文字稿
@@ -349,16 +389,24 @@ study-buddy/
 │   │   └── probe-dirs.js    启动自检
 │   ├── extension/           浏览器扩展（Manifest V3）
 │   │   ├── manifest.json
-│   │   ├── background.js    Service Worker：执行抓取任务
-│   │   ├── content.js       页内角标与播放状态上报
+│   │   ├── background.js    Service Worker：代发本机请求、执行抓取任务
+│   │   ├── content.js       页内角标（可拖动）+「一键播放答题」按钮挂载点
 │   │   ├── focus-mode.js    防暂停（可选）
-│   │   ├── ask-panel.js     页内「学伴答疑」面板
+│   │   ├── ask-panel.js     页内「学伴答疑」面板（默认不加载）
+│   │   ├── cand-chars.js    候选汉字表（解混淆的回退路径）
+│   │   ├── pilot-core.js    一键播放答题：取数、字体解码、接口调用
+│   │   ├── auto-pilot.js    一键播放答题：状态机主流程
+│   │   ├── typr-lite.js     字体解析（Typr.js，MIT，见 THIRD-PARTY.md）
+│   │   ├── md5-mini.js      MD5（blueimp-md5，MIT，见 THIRD-PARTY.md）
+│   │   ├── font-table.js    字体映射表（字形 MD5 → 汉字，见 THIRD-PARTY.md）
 │   │   └── popup.html/js    工具栏弹窗：连接状态
 │   ├── renderer/            界面（原生 HTML/CSS/JS，无框架）
 │   └── assets/              图标
 ├── tools/
 │   ├── transcribe.py        语音识别脚本（faster-whisper）
-│   └── setup-transcribe.ps1 一键安装转写环境
+│   ├── setup-transcribe.ps1 一键安装转写环境
+│   ├── build-font-table.mjs 生成字体映射表（题库解码用）
+│   └── check-extension.mjs  扩展合规自检
 ├── docs/screenshots/        文档截图
 ├── 启动学习通学伴.cmd
 └── LICENSE

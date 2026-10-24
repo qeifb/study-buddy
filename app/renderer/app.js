@@ -1006,8 +1006,108 @@ function bind() {
 
 /* ───────────── 启动 ───────────── */
 
+/**
+ * 自动抓日志的进度显示（用户要求，2026-10-24）。
+ *
+ * 用户原话：「我想让『[transcribe] 模型加载成功…开始转写…』在应用里同步显示，
+ * 不然用户会认为这个应用是多余的没用，最好的是把下载的任务提示也给加进应用
+ * 和扩展插件相合作一同显示进度」。
+ *
+ * 背景：扩展点「一键播放答题」时会自动抓课程日志，之前只在后台写 app.log，
+ * 界面零提示 —— 用户看到视频在播但应用毫无动静，以为应用没在工作。
+ * 现在把 main.js 广播的 autocapture:event 渲染成界面上的实时进度。
+ */
+function mountAutoCaptureProgress() {
+  // 一个固定的浮层区域，避免污染会话记录
+  let panel = null
+  let rows = null
+  const seen = new Map()  // stage → row
+
+  function ensurePanel() {
+    if (panel && document.body.contains(panel)) return panel
+    panel = el('div', 'autocapture-panel')
+    panel.style.cssText = [
+      'position:fixed', 'right:18px', 'bottom:84px', 'width:330px', 'max-height:44vh',
+      'overflow:auto', 'z-index:9999', 'padding:10px 12px', 'border-radius:10px',
+      'background:rgba(24,27,34,.96)', 'border:1px solid rgba(88,166,255,.35)',
+      'box-shadow:0 8px 28px rgba(0,0,0,.45)', 'color:#e8eaed',
+      'font:12px/1.55 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif',
+    ].join(';')
+
+    const head = el('div')
+    head.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:8px'
+    const title = el('div', null, '📚 正在自动抓取课程日志')
+    title.style.cssText = 'flex:1;font-weight:600;color:#8cc4ff'
+    const close = el('span', null, '×')
+    close.style.cssText = 'cursor:pointer;color:#9aa0a8;font-size:15px;padding:0 4px'
+    close.onclick = () => { try { panel.remove() } catch { /* ignore */ } panel = null }
+    head.appendChild(title)
+    head.appendChild(close)
+    panel.appendChild(head)
+
+    rows = el('div')
+    panel.appendChild(rows)
+    document.body.appendChild(panel)
+    return panel
+  }
+
+  function addRow(text, kind, key) {
+    ensurePanel()
+    if (key && seen.has(key)) {
+      const row = seen.get(key)
+      const label = row.lastChild
+      if (label) label.textContent = text
+      return
+    }
+    const row = el('div')
+    row.style.cssText = 'display:flex;gap:6px;align-items:flex-start;margin:3px 0'
+    const dot = el('span', null, '•')
+    dot.style.cssText = 'color:' + (kind === 'done' ? '#63cf7f' : kind === 'err' ? '#ff6b6b' : '#8cc4ff') + ';flex:0 0 auto'
+    const label = el('span', null, text)
+    label.style.cssText = 'flex:1;word-break:break-word'
+    row.appendChild(dot)
+    row.appendChild(label)
+    rows.appendChild(row)
+    if (key) seen.set(key, row)
+    try { panel.scrollTop = panel.scrollHeight } catch { /* ignore */ }
+  }
+
+  function finish(ok, text) {
+    ensurePanel()
+    addRow(text, ok ? 'done' : 'err', null)
+    const head = panel.querySelector('div')
+    if (head && head.firstChild) head.firstChild.textContent = ok ? '✅ 课程日志已就绪' : '❌ 抓取失败'
+    // 成功 6 秒后自动收起
+    setTimeout(() => {
+      try { if (panel) { panel.style.opacity = '0'; setTimeout(() => { try { panel && panel.remove() } catch { /* ignore */ } panel = null }, 300) } } catch { /* ignore */ }
+    }, ok ? 6000 : 15000)
+  }
+
+  try {
+    api.autocapture.onEvent((e) => {
+      const type = e && e.type
+      if (type === 'start') {
+        addRow(e.text || '扩展已触发自动抓取…', '', 'start')
+      } else if (type === 'stage') {
+        const st = e.stage || 'stage'
+        const seg = e.segments ? `（已转写 ${e.segments} 段）` : ''
+        // 转写类进度原地更新，避免刷屏
+        const key = (st === 'transcribe' || st === 'download') ? st : null
+        addRow((e.text || st) + seg, st === 'error' ? 'err' : '', key)
+      } else if (type === 'done') {
+        finish(true, e.text || `课程日志已就绪：《${e.title || ''}》${e.segments ? `（${e.segments} 段）` : ''}`)
+      } else if (type === 'failed') {
+        finish(false, e.text || ('抓取失败：' + (e.error || '未知错误')))
+      }
+    })
+  } catch (err) {
+    logErr('bind autocapture', err)
+  }
+}
+
 async function boot() {
   bind()
+  mountAutoCaptureProgress()
   try { setSideCollapsed(localStorage.getItem(SIDE_KEY) === '1', false) } catch { setSideCollapsed(false, false) }
   try { state.settings = await api.settings.load() } catch { state.settings = null }
   await refreshChats()

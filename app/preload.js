@@ -55,6 +55,17 @@ contextBridge.exposeInMainWorld('studyBuddy', {
     onEvent: (handler) => subscribe('capture:event', handler),
   },
 
+  /** 自动抓日志（扩展点「一键播放答题」时触发）：进度广播到界面 */
+  autocapture: {
+    onEvent: (handler) => subscribe('autocapture:event', handler),
+  },
+
+  /** 章节测验作答依据：让用户看到 AI 是按哪节课、哪一段内容作答的 */
+  quiz: {
+    onEvent: (handler) => subscribe('quiz:event', handler),
+    recent: () => invoke('quiz:recent'),
+  },
+
   ai: {
     chat: (payload) => invoke('ai:chat', payload),
     onEvent: (handler) => subscribe('ai:event', handler),

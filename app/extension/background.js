@@ -1027,6 +1027,23 @@ heartbeat({ woke: true })
 
 // popup / 内容脚本可以主动请求一次
 chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+  /**
+   * 告诉内容脚本它自己所在的 tabId。
+   *
+   * 内容脚本拿不到自己的 tabId，而应用端调 executeScript 时必须要有它，
+   * 否则报 "Missing required property 'tabId'"（2026-10-24 用户实测）。
+   * sender.tab.id 就是最可靠的来源。
+   */
+  if (msg?.type === 'studybuddy:whoami') {
+    try {
+      const tabId = _sender && _sender.tab && Number.isInteger(_sender.tab.id) ? _sender.tab.id : null
+      sendResponse({ ok: tabId != null, tabId })
+    } catch (e) {
+      sendResponse({ ok: false, tabId: null, error: String(e?.message || e) })
+    }
+    return true
+  }
+
   if (msg?.type === 'ping') {
     heartbeat().then((ok) => sendResponse({ ok, lastError, port: null }))
     return true

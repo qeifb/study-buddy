@@ -11,7 +11,8 @@ const { app, BrowserWindow, ipcMain, shell, dialog, Tray, Menu, nativeImage } = 
 const path = require('node:path')
 const fs = require('node:fs')
 const os = require('node:os')
-const { spawn, execFileSync } = require('node:child_process')
+const crypto = require('node:crypto')
+const { spawn, execFile } = require('node:child_process')
 
 const { listBrowsers, attachToBrowser } = require('./core/browsers')
 const { launchDedicated, closeDedicated } = require('./core/launcher')
@@ -114,8 +115,7 @@ let ext = null
 let extPort = EXT_DEFAULT_PORT
 let tray = null
 /** 关闭行为：'tray'（最小化到托盘）或 'quit'（退出程序） */
-let closeAction = 'tray'
-/**
+let closeAction = 'tray'/**
  * 单实例判据：**端口占用**，而不是锁文件。
  *
  * 为什么不用文件锁：
@@ -141,8 +141,39 @@ async function tryClaimPort(port) {
   })
 }
 
-/** 是否已勾选「保存设置，不再提醒」 */
+/**
+ * 是否已勾选「保存设置，不再提醒」
+ *
+ * ⚠️ 2026-10-24 用户报：「点击保存不再提醒这个没用啊，每次关闭还会提示这个出来」。
+ *    根因：这个开关和 closeAction 都只是**内存变量**（let），程序退出就丢了。
+ *    用户勾了「不再提醒」→ 关掉应用 → 下次启动 closeRemember 又是 false → 又弹窗。
+ *
+ *    修复：持久化到 settings.json，启动时读回来。
+ *    （用现有的 readSettings/writeSettings，避免再引入一套存储逻辑）
+ */
 let closeRemember = false
+
+/** 从 settings.json 恢复关闭行为（启动时调用一次） */
+function restoreCloseBehavior() {
+  try {
+    const s = readSettings() || {}
+    if (typeof s.closeAction === 'string' && (s.closeAction === 'tray' || s.closeAction === 'quit')) {
+      closeAction = s.closeAction
+    }
+    closeRemember = Boolean(s.closeRemember)
+    if (closeRemember) {
+      appendAppLog?.(`[close] 已恢复关闭行为: action=${closeAction} remember=${closeRemember}`)
+    }
+  } catch { /* ignore */ }
+}
+
+/** 把关闭行为写回 settings.json */
+function persistCloseBehavior() {
+  try {
+    writeSettings({ closeAction, closeRemember: Boolean(closeRemember) })
+  } catch { /* ignore */ }
+}
+
 /** 托盘提示只弹一次 */
 let trayTipShown = false
 
@@ -198,6 +229,695 @@ const ANSWER_FORMAT = [
   '- 正文里找不到依据的题，明确说「这题在转写里找不到依据，我不确定」，不要猜。',
   '- 学生若要求「看原稿 / 全文 / 老师原话」，告诉他原稿就是本机保存的转写文件（文件名是「课名.md」），在应用左下角「打开课程日志文件夹」里能打开，也可以直接在对话的课程日志卡片上点「打开日志文件」；不要回答「没有原稿」。',
 ].join('\n')
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * 章节测验自动作答（契约见 docs/quiz-api-contract.md A 节）
+ *
+ * 与页内问答的区别：问答只要一段话，这里要**机器可执行的结构化答案**，
+ * 所以必须强制 AI 输出严格 JSON，并由我们自己校验、兜底、纠错。
+ * ══════════════════════════════════════════════════════════════════════════ */
+
+/** 测验作答专用提示词：约束输出格式为严格 JSON */
+const QUIZ_FORMAT = [
+  '【输出格式（必须严格遵守）】',
+  '- 只输出一个 JSON 对象，不要输出任何解释、说明、Markdown 代码围栏（不要 ```json）、注释或多余文字。',
+  '- 第一个字符必须是 {，最后一个字符必须是 }。',
+  '- JSON 结构：{"answers":[{"qid":"题目标识","keys":["选项key"],"reason":"不超过80字的中文理由"}]}',
+  '- qid 必须原样使用题目里给出的 qid，是字符串，不要加引号以外的修饰。',
+  '- keys 是字符串数组，元素必须是该题 options 里给出的 key 之一（原样照抄，区分大小写）。',
+  '- 多选题可以给多个 key；单选题只能给 1 个 key；判断题只能给 "true" 或 "false"。',
+  '- 判断题**不要**返回「对」「错」「A」「B」「正确」「错误」——只允许字符串 "true" 或 "false"。',
+  '- reason 里不要出现 Markdown 符号、不要出现换行。',
+  '- 数字与布尔值一律用字符串形式（qid 是字符串）。',
+  '',
+  '【作答纪律（极重要，务必遵守）】',
+  '- **每道题都必须给出 keys，绝对不能留空数组。** 空着不答 = 这道题 0 分，和答错完全一样，',
+  '  而作答至少还有蒙对的机会。所以宁可推测也必须作答。',
+  '- 优先级：①课程正文里有明确依据 → 按依据作答；②正文里有相关内容可推断 → 按最合理的推断作答；',
+  '  ③正文完全没提到 → 依据题型、常识、学术背景与上下文，选最可能的选项作答。',
+  '- 无论哪种情况，keys 都必须是非空的合法 key。',
+  '- 若你的答案主要靠推测而非正文依据，请在 reason 末尾加「（推测）」二字，便于人工复核。',
+  '- 例外：只有当题目本身残缺、选项 key 缺失、或题干完全无法理解（例如仍是未解混淆的乱码）时，',
+  '  才允许 keys 给空数组，并在 reason 里说明原因。',
+].join('\n')
+
+/**
+ * 从 AI 输出里抠出 JSON 对象。
+ *
+ * 实测模型常犯的毛病：包一层 ```json 围栏、前面加「好的，以下是答案：」、
+ * 末尾加解释。所以按「直接 parse → 去围栏 → 取首{到末}」三级降级。
+ * @returns {object|null}
+ */
+function extractJson(raw) {
+  const text = String(raw || '').replace(/^\uFEFF/, '').trim()
+  if (!text) return null
+
+  // ① 直接 parse
+  try {
+    const v = JSON.parse(text)
+    if (v && typeof v === 'object') return v
+  } catch { /* 下一级 */ }
+
+  // ② 去掉 Markdown 代码围栏
+  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i)
+  if (fence) {
+    try {
+      const v = JSON.parse(fence[1].trim())
+      if (v && typeof v === 'object') return v
+    } catch { /* 下一级 */ }
+  }
+
+  // ③ 取第一个 { 到最后一个 }（贪心，容忍中间有换行）
+  const start = text.indexOf('{')
+  const end = text.lastIndexOf('}')
+  if (start >= 0 && end > start) {
+    try {
+      const v = JSON.parse(text.slice(start, end + 1))
+      if (v && typeof v === 'object') return v
+    } catch { /* 失败 */ }
+  }
+
+  return null
+}
+
+/** 判断题答案归一化：把「对/错/A/B/true/false」统一成 true/false 字符串 */
+function normalizeJudgeKey(k) {
+  const s = String(k == null ? '' : k).trim().toLowerCase()
+  if (!s) return ''
+  if (['true', 't', 'a', '对', '正确', '是', '√', 'yes', 'y', '1'].includes(s)) return 'true'
+  if (['false', 'f', 'b', '错', '错误', '否', '×', 'x', 'no', 'n', '0'].includes(s)) return 'false'
+  return ''
+}
+
+/**
+ * 校验并收敛 AI 给出的答案。
+ *
+ * 这里是「宁可少答，不可错答」的落点：任何不合法的 key 一律丢弃；
+ * 收敛后为空的题不进 answers，只在 warnings 里记一笔。
+ *
+ * @param {object} parsed  AI 返回的已解析对象
+ * @param {Array} questions 请求里的题目
+ * @returns {{answers:Array, warnings:string[]}}
+ */
+function validateQuizAnswers(parsed, questions) {
+  const warnings = []
+  const byQid = new Map()
+  for (const q of questions) byQid.set(String(q.qid), q)
+
+  const list = Array.isArray(parsed?.answers) ? parsed.answers : []
+  const got = new Map()
+  for (const a of list) {
+    if (!a || typeof a !== 'object') continue
+    const qid = String(a.qid == null ? '' : a.qid).trim()
+    if (!qid || !byQid.has(qid)) {
+      if (qid) warnings.push(`AI 给出了不存在的 qid=${qid}，已忽略`)
+      continue
+    }
+    if (got.has(qid)) continue // 同一题重复，保留第一条
+    got.set(qid, a)
+  }
+
+  const answers = []
+  for (const q of questions) {
+    const qid = String(q.qid)
+    const a = got.get(qid)
+
+    const qtype = Number(q.qtype)
+    const opts = Array.isArray(q.options) ? q.options : []
+    const validKeys = new Set(opts.map((o) => String(o.key)))
+    const firstKey = opts.length ? String(opts[0].key) : ''
+
+    /**
+     * 兜底作答（2026-10-24 用户指出：留空不答 = 0 分，和答错一样）。
+     * 任何「拿不到合法 key」的情况都不能 skip 掉整道题，必须给一个兜底答案。
+     * 兜底策略按题型：
+     *   判断题 → "true"（若合法，否则取第一个合法项）
+     *   单选   → 第一个合法 key
+     *   多选   → 第一个合法 key（宁可少选也别空着）
+     * 兜底答案会在 reason 里标「（兜底）」便于人工复核。
+     */
+    function fallbackKey() {
+      if (qtype === 3) {
+        for (const cand of ['true', 'false']) if (validKeys.has(cand)) return cand
+      }
+      return firstKey || ''
+    }
+
+    if (!a) {
+      // AI 完全没返回这道题 → 兜底作答，绝不跳过
+      const fb = fallbackKey()
+      if (fb) {
+        warnings.push(`题目 ${qid} AI 未返回答案，已按兜底作答（${fb}）`)
+        answers.push({ qid, keys: [fb], reason: '（兜底）AI 未返回该题答案，按默认选项作答' })
+      } else {
+        warnings.push(`题目 ${qid} AI 未返回答案且无可选选项，无法作答`)
+      }
+      continue
+    }
+
+    let keys = Array.isArray(a.keys) ? a.keys.map((k) => String(k)) : []
+
+    // 判断题：先归一化，再校验必须落在合法集合里
+    if (qtype === 3) {
+      const norm = keys.map(normalizeJudgeKey).filter(Boolean)
+      keys = norm
+      // 归一化后仍不在该题 options 里（例如题目 key 不是 true/false）→ 退回原值再过滤
+      if (!keys.length) {
+        keys = Array.isArray(a.keys) ? a.keys.map((k) => String(k)) : []
+      }
+      keys = keys.filter((k) => validKeys.has(k)).slice(0, 1)
+      if (!keys.length) {
+        const fb = fallbackKey()
+        if (fb) {
+          warnings.push(`判断题 ${qid} 未给出可用的 true/false，已兜底作答（${fb}）`)
+          keys = [fb]
+        } else {
+          warnings.push(`判断题 ${qid} 无可选 true/false 选项，无法作答`)
+          continue
+        }
+      }
+    } else if (qtype === 2) {
+      // 单选：只保留合法 key，取第一个
+      keys = keys.filter((k) => validKeys.has(k)).slice(0, 1)
+      if (!keys.length) {
+        const fb = fallbackKey()
+        if (fb) {
+          warnings.push(`单选题 ${qid} 未给出合法选项，已兜底作答（${fb}）`)
+          keys = [fb]
+        } else {
+          warnings.push(`单选题 ${qid} 无可选选项，无法作答`)
+          continue
+        }
+      }
+    } else {
+      // 多选：去重 + 按字母序 + 保留合法项
+      const seen = new Set()
+      keys = keys.filter((k) => {
+        if (!validKeys.has(k) || seen.has(k)) return false
+        seen.add(k)
+        return true
+      }).sort()
+      if (!keys.length) {
+        const fb = fallbackKey()
+        if (fb) {
+          warnings.push(`多选题 ${qid} 未给出合法选项，已兜底作答（${fb}）`)
+          keys = [fb]
+        } else {
+          warnings.push(`多选题 ${qid} 无可选选项，无法作答`)
+          continue
+        }
+      }
+    }
+
+    const reason = String(a.reason == null ? '' : a.reason)
+      .replace(/[*#`\r\n]/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .slice(0, 80)
+
+    answers.push({ qid, keys, reason })
+  }
+
+  return { answers, warnings }
+}
+
+/**
+ * 组装测验作答的 prompt。
+ *
+ * 题干与选项按契约 0.4.1 可能是结构化对象 {raw, decoded, confidence, lowConfidence}，
+ * 这里统一渲染成文本，并把 raw/decoded 两份都交给模型（契约 0.4.2 要求双参考）。
+ */
+function renderQuizField(field) {
+  if (field == null) return { text: '', extra: '' }
+  if (typeof field === 'string') {
+    // 兼容旧调用：只有原始文本，此时视为「未解码」
+    return { text: field, extra: '' }
+  }
+  const raw = String(field.raw == null ? '' : field.raw)
+  const decoded = String(field.decoded == null ? '' : field.decoded)
+  const conf = Number(field.confidence)
+  const low = Array.isArray(field.lowConfidence) ? field.lowConfidence : []
+
+  // 解码成功且与原文不同 → 两份都给
+  if (decoded && decoded !== raw) {
+    let extra = `\n    [raw] ${raw}\n    [decoded] ${decoded}`
+    if (Number.isFinite(conf)) extra += `\n    [confidence] ${conf.toFixed(2)}`
+    if (low.length) {
+      const marks = low.slice(0, 20).map((x) => `${x.from}→${x.to}(${Number(x.score).toFixed(2)})`).join('、')
+      extra += `\n    [低置信字] ${marks}`
+    }
+    return { text: decoded, extra }
+  }
+
+  // 未解码或与原文相同 → 只给一份，但若置信度低要标出来
+  let extra = ''
+  if (Number.isFinite(conf) && conf > 0 && conf < 0.7) extra = `\n    [confidence] ${conf.toFixed(2)}（还原把握不大，请结合课程正文判断）`
+  return { text: decoded || raw, extra }
+}
+
+/**
+ * 把题目列表渲染成给模型看的文本块。
+ */
+function renderQuestionsForPrompt(questions) {
+  const lines = []
+  questions.forEach((q, i) => {
+    const qtype = Number(q.qtype)
+    const typeName = q.typeText
+      || (qtype === 1 ? '多选题' : qtype === 2 ? '单选题' : qtype === 3 ? '判断题' : '题目')
+    const stem = renderQuizField(q.stem)
+    lines.push(`【第 ${i + 1} 题】qid=${String(q.qid)}　题型=${typeName}（qtype=${qtype}）`)
+    lines.push(`  题干: ${stem.text}${stem.extra}`)
+    for (const o of (q.options || [])) {
+      const t = renderQuizField(o.text)
+      lines.push(`    选项 key=${String(o.key)}: ${t.text}${t.extra}`)
+    }
+    lines.push('')
+  })
+  return lines.join('\n')
+}
+
+/**
+ * 章节测验作答处理器（由 ext.setQuizAnswerHandler 注入 extserver）。
+ *
+ * 契约要求（docs/quiz-api-contract.md）：
+ *  · R2 绝不跨课：只用 findCourseLogForUrl 精确匹配 chapterId，找不到就拒答
+ *  · 严格 JSON：解析失败重试恰好一次，仍失败返回 parse-failed
+ *  · 非法 key 过滤；判断题强制 true/false
+ */
+async function handleQuizAnswer({ body }) {
+  const url = String(body?.url || '')
+  const chapterIdFromBody = String(body?.chapterId || '').trim()
+  const workId = String(body?.workId || '').trim()
+  const questions = Array.isArray(body?.questions) ? body.questions : []
+  // 扩展侧传入的解码质量（2026-10-24 新增）：{obfTotal, lowN, lowRatio, avg, warn}
+  const dq = body?.decodeQuality && typeof body.decodeQuality === 'object' ? body.decodeQuality : null
+
+  // ① 定位课程日志（章节级精确匹配；绝不退回「最近一篇」）
+  const hit = findCourseLogForUrl(url) || (chapterIdFromBody ? lessons.findByChapterId(NOTES_DIR, chapterIdFromBody) : null)
+  if (!hit) {
+    appendAppLog(`[quiz] 无课程日志，拒答 chapterId=${chapterIdFromBody || '(空)'} workId=${workId} url=${url.slice(0, 120)}`)
+    return {
+      status: 409,
+      payload: {
+        ok: false,
+        error: 'no-course-log',
+        message: '这节课还没有课程日志，无法作答（不会拿别的课的内容来凑）',
+        detail: { chapterId: chapterIdFromBody },
+      },
+    }
+  }
+
+  // ② 读日志正文（与 askHandler 一致：截断 60000 字符）
+  let context = ''
+  try {
+    context = fs.readFileSync(hit.file, 'utf8').slice(0, 60000)
+  } catch {
+    appendAppLog(`[quiz] 读日志失败 ${path.basename(hit.file)}`)
+    return {
+      status: 409,
+      payload: { ok: false, error: 'no-course-log', message: '课程日志读取失败', detail: { chapterId: hit.chapterId } },
+    }
+  }
+  if (!context.trim()) {
+    appendAppLog(`[quiz] 日志正文为空，拒答 chapterId=${hit.chapterId}`)
+    return {
+      status: 409,
+      payload: { ok: false, error: 'no-course-log', message: '课程日志正文为空', detail: { chapterId: hit.chapterId } },
+    }
+  }
+
+  // ③ 组装 prompt
+  const sysPrompt = [
+    `以下是学生正在学习的课程日志（原样转写，未加工）。请优先依据它回答测验题。`,
+    `作答纪律：每道题都必须选出答案，即使正文没有直接依据，也要按最合理的推断作答并标注「（推测）」。`,
+    `留空不答等于 0 分，和答错完全一样，所以宁可推测也不要空着。`,
+    ``,
+    `课程：${hit.title}　时长：${hit.duration || '未知'}　章节ID：${hit.chapterId}`,
+    ``,
+    QUIZ_FORMAT,
+    ``,
+    `【题干与选项说明】`,
+    `有些题干/选项会同时给出 [raw]（原始文本，可能是被字体混淆的乱码）与 [decoded]（解混淆后的文本）。`,
+    `请同时参考两者：以 decoded 为主要依据；当 decoded 中出现语义不通、明显不成词的片段时，结合 raw 的字符位置与课程正文上下文判断真实含义。`,
+    `遇到标了 [低置信字] 的字符，必须结合课程正文语境确认，不要机械采信 decoded。`,
+    `若 raw 与 decoded 都读不通、确实无法理解题意，才允许 keys 给空数组并在 reason 说明；否则必须给出答案。`,
+    ``,
+    // 2026-10-24 新增：把解码质量告诉 AI，让它知道这章的字有多可信
+    ...(dq ? [
+      `【本章文字解码质量】`,
+      `共 ${dq.obfTotal} 个混淆字，其中 ${dq.lowN} 个低置信（占比 ${Math.round((dq.lowRatio || 0) * 100)}%），平均置信度 ${dq.avg}。`,
+      dq.warn
+        ? `低置信字较多，题干可能有个别错字。请重点结合课程正文的语义判断题目真实含义，不要因为某个字看起来不通就放弃作答。`
+        : `解码质量良好，可按 decoded 正常理解。`,
+      ``,
+    ] : []),
+    `【课程正文】`,
+    context,
+  ].join('\n')
+
+  const userPrompt = [
+    `请作答以下 ${questions.length} 道测验题，严格按 JSON 格式输出。`,
+    ``,
+    renderQuestionsForPrompt(questions),
+  ].join('\n')
+
+  // ④ 调 AI（首次）
+  const t0 = Date.now()
+  let rawText = ''
+  try {
+    const reply = await chat({
+      messages: [
+        { role: 'system', content: sysPrompt },
+        { role: 'user', content: userPrompt },
+      ],
+    })
+    rawText = String(reply || '')
+  } catch (e) {
+    const msg = String(e?.message || e)
+    appendAppLog(`[quiz] AI 调用失败 chapterId=${hit.chapterId} 题数=${questions.length} 耗时=${Date.now() - t0}ms err=${msg}`)
+    const isKey = /API Key|apiKey|还没有配置/i.test(msg)
+    return {
+      status: isKey ? 409 : 502,
+      payload: {
+        ok: false,
+        error: isKey ? 'ai-not-configured' : 'ai-timeout',
+        message: isKey ? '还没有配置模型 API Key，请先在应用左下角「设置」里填写' : `AI 调用失败：${msg}`,
+        detail: { chapterId: hit.chapterId },
+      },
+    }
+  }
+
+  // ⑤ 解析（失败重试恰好一次）
+  let parsed = extractJson(rawText)
+  let retried = false
+  if (!parsed) {
+    retried = true
+    appendAppLog(`[quiz] 首次解析失败，重试一次 chapterId=${hit.chapterId}`)
+    try {
+      const reply2 = await chat({
+        messages: [
+          { role: 'system', content: sysPrompt },
+          { role: 'user', content: userPrompt },
+          {
+            role: 'assistant',
+            content: String(rawText).slice(0, 2000),
+          },
+          {
+            role: 'user',
+            content: '上次输出无法解析为 JSON。这次只输出 JSON 对象本身：第一个字符必须是 {，最后一个字符必须是 }，不要任何其它文字、不要代码围栏。',
+          },
+        ],
+      })
+      parsed = extractJson(String(reply2 || ''))
+    } catch (e) {
+      appendAppLog(`[quiz] 重试调用失败 chapterId=${hit.chapterId} err=${String(e?.message || e)}`)
+    }
+  }
+
+  const elapsed = Date.now() - t0
+
+  if (!parsed) {
+    appendAppLog(`[quiz] parse-failed chapterId=${hit.chapterId} 题数=${questions.length} 重试=${retried} 耗时=${elapsed}ms`)
+    return {
+      status: 502,
+      payload: {
+        ok: false,
+        error: 'parse-failed',
+        message: 'AI 返回的内容无法解析为答案 JSON，已跳过本次作答（不会带着不完整答案提交）',
+        detail: { chapterId: hit.chapterId, rawHead: String(rawText).slice(0, 200) },
+      },
+    }
+  }
+
+  // ⑥ 校验 + 收敛
+  const { answers, warnings } = validateQuizAnswers(parsed, questions)
+
+  appendAppLog(`[quiz] 作答完成 chapterId=${hit.chapterId} 日志=${path.basename(hit.file)} 题数=${questions.length} 有答案=${answers.length} 重试=${retried} 耗时=${elapsed}ms`)
+
+  // 把「作答依据」广播到应用界面：用户要求能确认答案是不是真按课程内容答的
+  // （不是黑盒输出）。记录：课程名、日志文件、题号、答案、理由、耗时。
+  const evidence = {
+    at: new Date().toISOString(),
+    chapterId: hit.chapterId,
+    lesson: hit.title || '',
+    logFile: path.basename(hit.file),
+    duration: hit.duration || '',
+    elapsedMs: elapsed,
+    retried,
+    questions: questions.map((q) => {
+      const a = answers.find((x) => String(x.qid) === String(q.qid))
+      return {
+        qid: String(q.qid),
+        qtype: q.qtype,
+        stem: renderQuizField(q.stem).text.slice(0, 120),
+        keys: a ? a.keys : [],
+        reason: a ? a.reason : '',
+        answered: Boolean(a),
+      }
+    }),
+    warnings: warnings.length ? warnings : [],
+  }
+  pushQuizEvidence(evidence)
+  broadcastQuizEvent('answered', { text: `已按《${hit.title || ''}》作答 ${answers.length} 题`, evidence })
+
+  if (!answers.length) {
+    return {
+      status: 200,
+      payload: {
+        ok: true,
+        chapterId: hit.chapterId,
+        workId,
+        logFile: path.basename(hit.file),
+        lesson: hit.title || '',
+        answers: [],
+        warnings: warnings.length ? warnings : ['AI 未给出任何可用答案，本次不提交'],
+      },
+    }
+  }
+
+  return {
+    status: 200,
+    payload: {
+      ok: true,
+      chapterId: hit.chapterId,
+      workId,
+      logFile: path.basename(hit.file),
+      lesson: hit.title || '',
+      answers,
+      warnings: warnings.length ? warnings : undefined,
+    },
+  }
+}
+
+
+/**
+ * 章节测验作答依据（用户可查看 AI 到底依据什么作答）。
+ *
+ * 用户诉求（2026-10-24）：「我怎么确定答题的正确率的保障？换一种说法就是
+ * 我怎么知道这个题目的答案是 AI 根据课程内容来进行回答的」。
+ * 所以每次作答都留档：哪节课、哪个日志文件、每题答案与理由、耗时。
+ * 只保留最近 50 条，内存 + 广播给界面，不写敏感内容到磁盘。
+ */
+const quizEvidenceList = []
+
+function pushQuizEvidence(ev) {
+  try {
+    quizEvidenceList.unshift(ev)
+    if (quizEvidenceList.length > 50) quizEvidenceList.length = 50
+    // 顺手落盘一份摘要，便于事后核对（不含完整题干，避免隐私）
+    try {
+      const p = path.join(DATA_DIR, 'quiz-evidence.json')
+      fs.writeFileSync(p, JSON.stringify(quizEvidenceList.slice(0, 20), null, 2), 'utf8')
+    } catch { /* ignore */ }
+  } catch { /* ignore */ }
+}
+
+function broadcastQuizEvent(type, payload) {
+  try {
+    for (const w of BrowserWindow.getAllWindows()) {
+      if (!w.isDestroyed() && w.webContents) w.webContents.send('quiz:event', { type, ...payload })
+    }
+  } catch { /* ignore */ }
+}
+
+/**
+ * 自动抓取当前页面那节课的课程日志（扩展点「一键播放答题」时自动调用）。
+ *
+ * 用户要求（2026-10-24）：「用户使用了扩展的[一键播放答题]功能时，应用要配合，
+ * 把识别课程日志调成全自动，扩展插件在运行哪个浏览器页面就抓取哪节课程的日志
+ * 方便后面视频播放完成之后的答题」。
+ *
+ * 契约（docs/quiz-api-contract.md B 节）：
+ *  · 已有日志且非 force → 同步返回 { ok, reused:true, title, file }
+ *  · 需要抓取 → 立即返回 { ok, started:true, jobId }，由扩展轮询 status
+ *  · 同一 chapterId 正在抓 → already-running
+ *  · 扩展没连上 → no-extension
+ */
+const autoCaptureRunning = new Map() // chapterId → jobId（防重入）
+
+async function handleAutoCapture({ body }) {
+  const url = String(body?.url || '')
+  const force = body?.force === true
+  const tabId = body?.tabId
+  const chapterIdFromBody = String(body?.chapterId || '').trim()
+
+  // ① 已经抓过就直接复用（除非 force）
+  if (!force) {
+    const existed = findCourseLogForUrl(url)
+      || (chapterIdFromBody ? lessons.findByChapterId(NOTES_DIR, chapterIdFromBody) : null)
+    if (existed) {
+      appendAppLog(`[autocapture] 复用已有日志《${existed.title}》chapterId=${existed.chapterId}`)
+      return {
+        status: 200,
+        payload: {
+          ok: true,
+          reused: true,
+          title: existed.title,
+          chapterId: existed.chapterId,
+          file: path.basename(existed.file),
+        },
+      }
+    }
+  }
+
+  // ② 扩展必须在线
+  //    ⚠️ 每条失败路径都必须写日志（2026-10-24 踩坑）：
+  //    用户报「自动切到下一节后抓日志超时」，但日志里一个字都没有，
+  //    因为这几种提前 return 都没记日志 → 完全无法诊断。现在全部补上。
+  if (!ext) {
+    appendAppLog(`[autocapture] 失败 no-extension（服务未启动） chapterId=${chapterIdFromBody || '(空)'}`)
+    return { status: 503, payload: { ok: false, error: 'no-extension', message: '扩展服务未启动' } }
+  }
+  const st = ext.state?.()
+  const lastHelloAt = st?.lastHello?.at || 0
+  const ageMs = lastHelloAt ? Date.now() - lastHelloAt : -1
+  const connected = Boolean(lastHelloAt && ageMs < 15000)
+  if (!connected) {
+    appendAppLog(`[autocapture] 失败 no-extension（扩展心跳过期 ${ageMs < 0 ? '从未连接' : Math.round(ageMs / 1000) + '秒前'}） chapterId=${chapterIdFromBody || '(空)'}`)
+    return {
+      status: 503,
+      payload: { ok: false, error: 'no-extension', message: '浏览器扩展未连接，请确认扩展已加载且学习通页面已打开' },
+    }
+  }
+
+  // ②.5 tabId 必须有值，否则扩展侧 executeScript 会报
+  //      "Error at property 'target': Missing required property 'tabId'"
+  //      优先用请求里带的；没带就从扩展上报的标签页列表里按 url/chapterId 找。
+  let useTabId = Number.isInteger(tabId) && tabId >= 0 ? tabId : null
+  if (useTabId == null) {
+    try {
+      const tabs = Array.isArray(st?.lastHello?.tabs) ? st.lastHello.tabs : []
+      const cid = chapterIdFromBody
+      const byUrl = tabs.find((t) => t && t.url && String(t.url).includes('chapterId=' + cid))
+      const byLooks = tabs.find((t) => t && t.looksLesson)
+      const picked = byUrl || byLooks || tabs[0]
+      if (picked && Number.isInteger(picked.id)) useTabId = picked.id
+    } catch { /* ignore */ }
+  }
+  if (useTabId == null) {
+    const tabInfo = (() => {
+      try {
+        const tabs = Array.isArray(st?.lastHello?.tabs) ? st.lastHello.tabs : []
+        return `tabs=${tabs.length}` + (tabs.length ? ' ids=' + tabs.map((t) => t?.id).join(',') : '')
+      } catch { return 'tabs=?'
+      }
+    })()
+    appendAppLog(`[autocapture] 失败 no-tab（拿不到标签页 id；${tabInfo}） chapterId=${chapterIdFromBody || '(空)'} url=${url.slice(0, 100)}`)
+    return {
+      status: 409,
+      payload: {
+        ok: false,
+        error: 'no-tab',
+        message: '拿不到当前标签页 id（扩展未上报），无法自动抓取。可手动点「📝 课程日志」抓一次。',
+        detail: { tabInfo },
+      },
+    }
+  }
+  appendAppLog(`[autocapture] 使用 tabId=${useTabId} chapterId=${chapterIdFromBody || '(空)'}`)
+
+  // ③ 防重入：同一 chapterId 只允许一个抓取任务
+  const dedupeKey = chapterIdFromBody || url
+  const running = autoCaptureRunning.get(dedupeKey)
+  if (running) {
+    return {
+      status: 200,
+      payload: { ok: true, started: true, jobId: running, alreadyRunning: true, message: '这节课正在抓取中，沿用同一个任务' },
+    }
+  }
+
+  // ④ 启动异步抓取，立刻把 jobId 交给扩展
+  const jobId = crypto.randomUUID()
+  autoCaptureRunning.set(dedupeKey, jobId)
+  ext.captureJobs.create(jobId, { chapterId: chapterIdFromBody })
+
+  // 广播到应用界面（用户要求：应用里要能看到自动抓取进度，不能只在后台静默抓）
+  const notifyRenderer = (type, payload) => {
+    try {
+      for (const w of BrowserWindow.getAllWindows()) {
+        if (!w.isDestroyed() && w.webContents) {
+          w.webContents.send('autocapture:event', { type, jobId, ...payload })
+        }
+      }
+    } catch { /* ignore */ }
+  }
+
+  notifyRenderer('start', {
+    chapterId: chapterIdFromBody,
+    text: '扩展已触发自动抓取，正在准备…',
+  })
+
+  const finishFail = (error, extra = {}) => {
+    autoCaptureRunning.delete(dedupeKey)
+    ext.captureJobs.finish(jobId, { ok: false, error })
+    appendAppLog(`[autocapture] 失败 ${error} ${JSON.stringify(extra)}`)
+    notifyRenderer('failed', { error, text: `抓取失败：${error}` })
+  }
+
+  // 不等它跑完（会 1-3 分钟），后台继续
+  ;(async () => {
+    try {
+      ext.captureJobs.update(jobId, { stage: 'scan', text: '正在通过浏览器插件读取当前页面…' })
+      notifyRenderer('stage', { stage: 'scan', text: '正在通过浏览器插件读取当前页面…' })
+      const result = await captureLessonViaExtension({
+        ext,
+        tabId: useTabId,
+        notesDir: NOTES_DIR,
+        reuse: !force,
+        onStage: (stage, text) => {
+          const t = String(text || '').slice(0, 200)
+          ext.captureJobs.update(jobId, { stage, text: t })
+          // 从进度文字里抠出已转写段数，例如「已转写 100 段 / 到 282s」
+          const m = /已转写\s*(\d+)\s*段/.exec(String(text || ''))
+          if (m) ext.captureJobs.update(jobId, { segments: Number(m[1]) })
+          if (stage === 'download') {
+            const t2 = /已下载\s*([\d.]+)\s*MB/.exec(String(text || ''))
+            if (t2) ext.captureJobs.update(jobId, { total: Number(t2[1]) })
+          }
+          notifyRenderer('stage', { stage, text: t, segments: m ? Number(m[1]) : undefined })
+        },
+      })
+      autoCaptureRunning.delete(dedupeKey)
+      ext.captureJobs.update(jobId, {
+        segments: result.segments || 0,
+        title: result.lessonName || '',
+        chapterId: result.chapterId || chapterIdFromBody,
+      })
+      ext.captureJobs.finish(jobId, { ok: true, file: result.file ? path.basename(result.file) : null })
+      appendAppLog(`[autocapture] 完成 《${result.lessonName || ''}》 chapterId=${result.chapterId || ''} 段数=${result.segments ?? '?'}`)
+      notifyRenderer('done', {
+        chapterId: result.chapterId || chapterIdFromBody,
+        title: result.lessonName || '',
+        segments: result.segments || 0,
+        file: result.file ? path.basename(result.file) : '',
+        text: `课程日志已就绪：《${result.lessonName || ''}》${result.segments ? `（${result.segments} 段）` : ''}`,
+      })
+    } catch (e) {
+      finishFail(String(e?.message || e), { url: url.slice(0, 100) })
+    }
+  })()
+
+  return { status: 200, payload: { ok: true, started: true, jobId } }
+}
 
 /**
  * 为一次问答准备课程上下文。
@@ -399,6 +1119,9 @@ function buildCourseContext({ chatId, messages, max = 3, forceChapterId = '' }) 
 }
 
 function createWindow() {
+  // 启动时恢复用户上次的关闭行为（2026-10-24 修复「不再提醒」不生效）
+  restoreCloseBehavior()
+
   win = new BrowserWindow({
     width: 1280,
     height: 820,
@@ -516,6 +1239,8 @@ function applyCloseChoice(result) {
   closeAction = result.act === 'quit' ? 'quit' : 'tray'
   closeRemember = Boolean(result.remember)
   try { setAutoStart(Boolean(result.autostart)) } catch { /* ignore */ }
+  // ★ 持久化（2026-10-24 修复「保存设置不再提醒不生效」）
+  persistCloseBehavior()
   if (closeAction === 'quit') {
     try { app.quit() } catch { /* ignore */ }
     return
@@ -768,6 +1493,12 @@ ipcMain.handle('logs:list', async () => ({
   })),
 }))
 
+// 章节测验作答依据：界面加载时拉一次最近记录，让用户能看到历史作答依据
+ipcMain.handle('quiz:recent', async () => ({
+  ok: true,
+  items: quizEvidenceList.slice(0, 20),
+}))
+
 // ── 转写环境（faster-whisper）检查与一键安装 ──
 function transcribePaths() {
   const pyenv = path.join(TOOLS_DIR, 'pyenv')
@@ -793,17 +1524,22 @@ ipcMain.handle('transcribe:status', async () => {
     ok: false,
   }
   if (out.py) {
-    try {
-      out.version = String(
-        execFileSync(p.py, ['-c', 'import faster_whisper;print(faster_whisper.__version__)'], {
-          timeout: 20000,
-          windowsHide: true,
-        })
-      ).trim()
-    } catch (e) {
-      out.version = ''
-      appendAppLog(`[transcribe:status] 导入 faster_whisper 失败：${e?.message || e}`)
-    }
+    // 注意：这里必须用异步 execFile。execFileSync 会卡住主进程（实测打开设置页要等 Python 冷启动好几秒）
+    out.version = await new Promise((resolve) => {
+      execFile(
+        p.py,
+        ['-c', 'import faster_whisper;print(faster_whisper.__version__)'],
+        { timeout: 25000, windowsHide: true },
+        (err, stdout) => {
+          if (err) {
+            appendAppLog(`[transcribe:status] 导入 faster_whisper 失败：${err.message}`)
+            resolve('')
+          } else {
+            resolve(String(stdout).trim())
+          }
+        }
+      )
+    })
   }
   out.ok = out.py && out.script && out.model && !!out.version
   return out
@@ -1215,6 +1951,32 @@ app.whenReady().then(async () => {
         chapterId: hit.chapterId,
         file: path.basename(hit.file),
       }
+    })
+
+    // 章节测验作答：扩展把抓到的题目交上来，这里用课程日志 + AI 出答案
+    ext.setQuizAnswerHandler(handleQuizAnswer)
+
+    // 自动抓日志：扩展点「一键播放答题」时自动抓当前页面那节课，不用用户手动操作
+    ext.setAutoCaptureHandler(handleAutoCapture)
+
+    // 交卷回执：扩展把「实际交了什么」报回来，留档供用户事后核对
+    ext.setQuizSubmittedHandler(async ({ body }) => {
+      const ev = {
+        at: new Date().toISOString(),
+        source: 'extension',
+        chapterId: String(body?.chapterId || ''),
+        workId: String(body?.workId || ''),
+        lesson: String(body?.lesson || ''),
+        logFile: String(body?.logFile || ''),
+        answers: Array.isArray(body?.answers) ? body.answers : [],
+      }
+      pushQuizEvidence(ev)
+      broadcastQuizEvent('submitted', {
+        text: `测验已交卷：《${ev.lesson || '未知名'}》${ev.answers.length} 题`,
+        evidence: ev,
+      })
+      appendAppLog(`[quiz] 交卷回执 chapterId=${ev.chapterId} workId=${ev.workId} 题数=${ev.answers.length}`)
+      return { ok: true }
     })
   }
 
