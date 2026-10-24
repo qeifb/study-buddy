@@ -383,61 +383,73 @@ async function captureLessonViaExtension({ ext, tabId, notesDir, onStage, reuse 
     throw new Error('这个页面里没找到视频。请确认已经打开某节课的播放页（视频能播放）。')
   }
 
-  // 3) 下载 + 转写
-  const mediaPath = path.join(notesDir, '.tmp', `${Date.now()}-lecture.mp4`)
-  const jsonPath = path.join(notesDir, '.tmp', `${Date.now()}-transcript.json`)
+  // 3) 下载 + 转写 + 落盘
+  //
+  // ⚠️ 2026-10-24 修复：整段包进 try/finally，**保证无论成功失败都清掉 .tmp**。
+  //
+  // 原实现把 `rmSync(.tmp)` 放在成功路径末尾（原第 426 行），
+  // 而它前面有 3 处 throw（找不到视频 / 转写失败 / 转写结果为空）。
+  // 一旦命中任一条，视频 mp4（20~50MB）就留在 .tmp 里，且文件名用 Date.now()，
+  // 下次抓取不会覆盖 ⇒ **多次失败会持续累积占用磁盘**（实测两次失败残留 55MB）。
+  let mediaPath = null
+  let jsonPath = null
+  try {
+    mediaPath = path.join(notesDir, '.tmp', `${Date.now()}-lecture.mp4`)
+    jsonPath = path.join(notesDir, '.tmp', `${Date.now()}-transcript.json`)
 
-  say('download', `正在下载视频（来源：${safeHost(src)}）…`)
-  const bytes = await downloadVideo(src, mediaPath, found.url || found.videoFrameUrl || '')
-  say('download', `视频已下载 ${(bytes / 1048576).toFixed(1)} MB，开始转写…`)
+    say('download', `正在下载视频（来源：${safeHost(src)}）…`)
+    const bytes = await downloadVideo(src, mediaPath, found.url || found.videoFrameUrl || '')
+    say('download', `视频已下载 ${(bytes / 1048576).toFixed(1)} MB，开始转写…`)
 
-  const r = await transcribe(mediaPath, { outPath: jsonPath, onLog: (l) => say('transcribe', l) })
-  if (!r.ok) throw new Error(r.error || '转写失败')
+    const r = await transcribe(mediaPath, { outPath: jsonPath, onLog: (l) => say('transcribe', l) })
+    if (!r.ok) throw new Error(r.error || '转写失败')
 
-  const segments = r.segments || []
-  duration = r.duration || duration
-  const transcriptText = segments.map((s) => `[${mmss(s.start)}] ${s.text}`).join('\n')
-  say('transcribe', `转写完成：${segments.length} 段 / ${transcriptText.length} 字`)
+    const segments = r.segments || []
+    duration = r.duration || duration
+    const transcriptText = segments.map((s) => `[${mmss(s.start)}] ${s.text}`).join('\n')
+    say('transcribe', `转写完成：${segments.length} 段 / ${transcriptText.length} 字`)
 
-  if (!transcriptText) throw new Error('转写结果为空')
+    if (!transcriptText) throw new Error('转写结果为空')
 
-  // 4) 落盘
-  const lessonName = found.chapterTitle || found.title || '未命名课时'
-  const cid = chapterIdOf(found.url)
-  // 同一节课重抓时沿用原文件，避免留下两份同章节日志
-  const existing = findByChapterId(notesDir, cid)
-  const file = existing ? existing.file : path.join(notesDir, `${cid ? cid + '-' : ''}${slug(lessonName)}.md`)
-  const header = [
-    `# ${lessonName}`,
-    '',
-    ...(found.courseTitle ? [`- 课程：${found.courseTitle}`] : []),
-    `- 来源页面：${found.url || ''}`,
-    `- 抓取方式：浏览器插件（无需调试端口）`,
-    `- 抓取时间：${new Date().toLocaleString('zh-CN')}`,
-    `- 时长：${mmss(duration)}`,
-    `- 转写段数：${segments.length}`,
-    '',
-    '---',
-    '',
-  ].filter((l) => l !== '').join('\n')
-  fs.mkdirSync(path.dirname(file), { recursive: true })
-  fs.writeFileSync(file, `${header}\n${transcriptText}\n`, 'utf8')
+    // 4) 落盘
+    const lessonName = found.chapterTitle || found.title || '未命名课时'
+    const cid = chapterIdOf(found.url)
+    // 同一节课重抓时沿用原文件，避免留下两份同章节日志
+    const existing = findByChapterId(notesDir, cid)
+    const file = existing ? existing.file : path.join(notesDir, `${cid ? cid + '-' : ''}${slug(lessonName)}.md`)
+    const header = [
+      `# ${lessonName}`,
+      '',
+      ...(found.courseTitle ? [`- 课程：${found.courseTitle}`] : []),
+      `- 来源页面：${found.url || ''}`,
+      `- 抓取方式：浏览器插件（无需调试端口）`,
+      `- 抓取时间：${new Date().toLocaleString('zh-CN')}`,
+      `- 时长：${mmss(duration)}`,
+      `- 转写段数：${segments.length}`,
+      '',
+      '---',
+      '',
+    ].filter((l) => l !== '').join('\n')
+    fs.mkdirSync(path.dirname(file), { recursive: true })
+    fs.writeFileSync(file, `${header}\n${transcriptText}\n`, 'utf8')
 
-  try { fs.rmSync(path.join(notesDir, '.tmp'), { recursive: true, force: true }) } catch { /* ignore */ }
+    say('saved', `课程日志已保存：${file}`)
 
-  say('saved', `课程日志已保存：${file}`)
-
-  return {
-    file,
-    lessonName,
-    courseName: found.courseTitle || '',
-    courseCandidates: found.courseCandidates || {},
-    duration,
-    segmentCount: segments.length,
-    chars: transcriptText.length,
-    transcript: transcriptText,
-    url: found.url || '',
-    via: 'extension',
+    return {
+      file,
+      lessonName,
+      courseName: found.courseTitle || '',
+      courseCandidates: found.courseCandidates || {},
+      duration,
+      segmentCount: segments.length,
+      chars: transcriptText.length,
+      transcript: transcriptText,
+      url: found.url || '',
+      via: 'extension',
+    }
+  } finally {
+    // ★ 无论成功、失败还是抛错，都清掉 .tmp（20~50MB 的视频与转写中间文件）
+    try { fs.rmSync(path.join(notesDir, '.tmp'), { recursive: true, force: true }) } catch { /* ignore */ }
   }
 }
 
@@ -535,7 +547,8 @@ async function captureLesson({ conn, notesDir, onStage }) {
     fs.writeFileSync(file, `${header}\n${transcriptText}\n`, 'utf8')
 
     // 清理临时文件
-    try { fs.rmSync(path.join(notesDir, '.tmp'), { recursive: true, force: true }) } catch { /* ignore */ }
+    // ⚠️ 2026-10-24：不再在这里删，统一移到末尾的 finally，
+    //    否则上面的 throw（转写失败 / 没有抓到内容）会跳过清理，留下 20~50MB 视频。
 
     say('saved', `课程日志已保存：${file}`)
 
@@ -551,6 +564,8 @@ async function captureLesson({ conn, notesDir, onStage }) {
     }
   } finally {
     try { cdp.close() } catch { /* ignore */ }
+    // ★ 无论成功、失败还是抛错，都清掉 .tmp
+    try { fs.rmSync(path.join(notesDir, '.tmp'), { recursive: true, force: true }) } catch { /* ignore */ }
   }
 }
 
