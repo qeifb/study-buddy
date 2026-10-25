@@ -52,8 +52,13 @@ function Restore-ConsoleEncoding {
 }
 
 # 现在才允许切 UTF-8（让本脚本自己的中文显示正常）
-try { [Console]::OutputEncoding = [Text.Encoding]::UTF8 } catch { }
+# ⚠️ 不要设置 [Console]::OutputEncoding = UTF8！
 
+# 本脚本被 .cmd（chcp 936 = GBK）用 powershell -File 调用，
+
+# 子进程 stdout 的字节由 cmd 按 GBK 解释。设 UTF-8 会导致中文全乱码。
+
+# 中文 Windows 的控制台默认就是 GBK，保持不动即可正确显示中文。
 # 无论成功/失败/异常退出，都恢复编码
 trap {
     Restore-ConsoleEncoding

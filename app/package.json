@@ -1,6 +1,6 @@
 {
   "name": "study-buddy",
-  "version": "0.4.0",
+  "version": "0.4.1",
   "private": true,
   "description": "学习通学伴 · 独立应用：抓取网课内容，AI 分析并生成课程日志",
   "main": "main.js",

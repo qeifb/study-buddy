@@ -47,7 +47,9 @@ function walk(dir, rel = '', out = []) {
 
 // ── 1. 完整版文件清单 ──
 const MAIN_TOP = ['app', 'docs', 'tools']
-const MAIN_ROOT_FILES = ['README.md', 'LICENSE', 'THIRD-PARTY.md', 'create-shortcut.ps1', '启动学习通学伴.cmd']
+const MAIN_ROOT_FILES = ['README.md', 'LICENSE', 'THIRD-PARTY.md', 'create-shortcut.ps1', '启动学习通学伴.cmd',
+  '创建快捷方式.cmd',
+]
 // ★ 白名单不再手写：自动收录 repo/tools 下所有 .mjs 与指定非脚本文件。
 // 历史教训：手动维护名单漏了 3 次（check-all / pack-release / verify-release），
 // 每次都是打包后才发现 tools 不全。改为自动扫描，永远不会漏。
@@ -304,11 +306,7 @@ const okFoc = verifyZip('study-buddy-focus-only.zip', {
 })
 
 // ── 5. 写元数据 ──
-fs.writeFileSync(path.join(DIST, '_release-meta.json'), JSON.stringify({
-  mainZip: mainMeta,
-  focusZip: focMeta,
-  builtAt: new Date().toISOString(),
-}, null, 2), 'utf8')
+// 元数据改到文件末尾写（因为 offlineMeta 在下面才生成）
 
 // ═══════════════════════════════════════════════════════════════════
 // 离线版（模型随包）—— study-buddy-offline.zip
@@ -380,6 +378,14 @@ if (!fs.existsSync(path.join(modelDir, 'model.bin'))) {
 
 // ── 6. 汇总 ──
 console.log('')
+// ── 写元数据（此时 mainMeta / focMeta / offlineMeta 都已就绪）──
+fs.writeFileSync(path.join(DIST, '_release-meta.json'), JSON.stringify({
+  mainZip: mainMeta,
+  focusZip: focMeta,
+  offlineZip: offlineMeta || null,
+  builtAt: new Date().toISOString(),
+}, null, 2), 'utf8')
+
 console.log('=== 汇总 ===')
 console.log(okMain ? '  ✅ study-buddy.zip（无模型版）' : '  ❌ study-buddy.zip 验证失败')
 console.log(okFoc ? '  ✅ study-buddy-focus-only.zip（仅防暂停）' : '  ❌ study-buddy-focus-only.zip 验证失败')
