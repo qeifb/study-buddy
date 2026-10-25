@@ -178,7 +178,53 @@ Warn "使用 PyPI 镜像加速：$PyPiIndex"
 # ★ 2026-10-25：不装 nvidia-* CUDA 包，纯 CPU 转写用不到，却占 2GB
 #   （cublas 736MB + cudnn 1096MB + nvrtc 178MB）。
 #   faster-whisper / ctranslate2 的依赖树里都没有它们，是 pip 自动带的可选包。
-& $PyExe -m pip install faster-whisper huggingface_hub --disable-pip-version-check -i $PyPiIndex
+    # ★ 2026-10-25 修：不锁版本会装到不能用的组合
+    #
+    #   实测（全新环境 + Python 3.14）：
+    #     pip install faster-whisper  → 一路回退到 0.10.1
+    #     → 依赖 av==10.* → 下载 av-10.0.0.tar.gz（源码包，无 wheel）
+    #     → Getting requirements to build wheel: error → 安装失败
+    #
+    #   根因：Python 3.14 太新，老 av / ctranslate2 没有预编译 wheel，
+    #        pip 会回退到「能解析但装不上」的老组合，然后试图源码编译。
+    #        用户机器上没有 VS Build Tools，源码编译必然失败。
+    #
+    #   本机已验证可用组合：faster-whisper 1.2.1 / av 19.0.1 / ctranslate2 4.8.3
+    #
+    #   三条约束缺一不可：
+    #     ① faster-whisper>=1.1.0  1.x 才适配新 Python
+    #     ② av>=14                 14+ 才有 3.13/3.14 的 wheel
+    #     ③ --only-binary=:all:    强制只用预编译包，禁止源码编译
+    $PipArgs = @(
+        "-m", "pip", "install",
+        "faster-whisper>=1.1.0",
+        "av>=14",
+        "huggingface_hub",
+        "--disable-pip-version-check",
+        "--only-binary=:all:",
+        "-i", $PyPiIndex
+    )
+    & $PyExe @PipArgs
+    $pipCode = $LASTEXITCODE
+    if ($pipCode -ne 0) {
+        Write-Host ""
+        Warn "标准组合装不上，尝试放宽约束重试（仍禁止源码编译）…"
+        & $PyExe -m pip install "faster-whisper>=1.1.0" "av>=14" huggingface_hub --disable-pip-version-check --only-binary=:all: -i $PyPiIndex
+        $pipCode = $LASTEXITCODE
+    }
+    if ($pipCode -ne 0) {
+        Die @"
+自动安装 faster-whisper 失败。
+
+最常见原因：你的 Python 版本太新（如 3.14），某些依赖还没有预编译包。
+本项目已禁用源码编译（那需要 Visual Studio Build Tools，普通电脑没有）。
+
+三条出路：
+  1. 让本脚本自动装 Python 3.12（删掉 tools\pyenv 后重新运行本脚本即可）
+  2. 手动装 Python 3.12，然后重跑本脚本
+  3. 换网络后重试（有的镜像缺 wheel）
+"@
+    }
 if ($LASTEXITCODE -ne 0) { Die "pip 安装失败，请检查网络（可尝试换国内镜像）。" }
 
 # 若之前装过 nvidia-*（旧版残留），主动卸掉，避免白占 2GB
