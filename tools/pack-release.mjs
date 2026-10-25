@@ -47,8 +47,10 @@ function walk(dir, rel = '', out = []) {
 
 // ── 1. 完整版文件清单 ──
 const MAIN_TOP = ['app', 'docs', 'tools']
-const MAIN_ROOT_FILES = ['README.md', 'LICENSE', 'THIRD-PARTY.md', 'create-shortcut.ps1', '启动学习通学伴.cmd',
-  '创建快捷方式.cmd',
+const MAIN_ROOT_FILES = [
+'README.md', 'LICENSE', 'THIRD-PARTY.md', 'create-shortcut.ps1', '启动学习通学伴.cmd',
+'创建快捷方式.cmd',
+  'clean-cache.ps1',
 ]
 // ★ 白名单不再手写：自动收录 repo/tools 下所有 .mjs 与指定非脚本文件。
 // 历史教训：手动维护名单漏了 3 次（check-all / pack-release / verify-release），

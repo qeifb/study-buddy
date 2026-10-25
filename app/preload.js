@@ -28,6 +28,9 @@ contextBridge.exposeInMainWorld('studyBuddy', {
     markCapture: (payload) => invoke('chats:markCapture', payload),
   },
 
+  visionTest: (payload) => ipcRenderer.invoke('vision:test', payload),
+
+
   settings: {
     load: () => invoke('settings:load'),
     save: (payload) => invoke('settings:save', payload),
@@ -77,6 +80,14 @@ contextBridge.exposeInMainWorld('studyBuddy', {
   },
 
   /** 转写环境（faster-whisper）：检查 + 一键安装 */
+  disk: {
+
+    usage: () => ipcRenderer.invoke('disk:usage'),
+
+    cleanCdrive: () => ipcRenderer.invoke('disk:cleanCdrive'),
+
+  },
+
   transcribe: {
     status: () => invoke('transcribe:status'),
     setup: () => invoke('transcribe:setup'),

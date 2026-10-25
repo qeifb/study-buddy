@@ -1,5 +1,12 @@
 /**
- * 学习通学伴 · 专注模式（默认开启，无需开关）
+ * 学习通防暂停（专注模式）· 独立版
+ *
+ * 这份脚本从完整的「学习通学伴」扩展中提取，只保留「防暂停」功能：
+ * 不需要 API Key、不联网、不抓日志、不需要 Node/Python。
+ *
+ * 2026-10-25 重新提取：旧独立版是另一份手写代码（11479 字节），
+ * 与完整版不一致，且会导致「页面出现多个专注模式卡片」。
+ * 现在同源生成，行为完全一致。
  *
  * 场景：人坐在电脑前看课，只是鼠标跑去点应用了。
  * 学习通把「鼠标离开播放框」误判成「人离开」，于是暂停视频。
@@ -16,6 +23,22 @@
  * 用户随时可关：点角标上的「暂停守护」按钮（关掉后本页不再续播）。
  */
 ;(function () {
+  /* ★ 2026-10-25 修「出现多个专注模式卡片」的 bug
+   *
+   * 原因：window.__studyBuddyFocusMode 只能防「同一个扩展的同一上下文」重复注入。
+   *   如果页面里同时存在完整版扩展和仅专注模式扩展（或同版本装了两份），
+   *   它们各有独立的 JS 上下文，window 变量互不可见 → 各插一个按钮 → 多个卡片。
+   *
+   * 修法：DOM 是共享的，所以用一个 DOM 元素当全局锁：
+   *   如果页面里已经存在带 data-sb-focus-lock 的元素，说明别的实例已在工作，直接退出。
+   */
+  try {
+    if (document.querySelector('[data-sb-focus-lock]')) return
+  } catch { /* ignore */ }
+  const lockEl = document.createElement('meta')
+  lockEl.setAttribute('data-sb-focus-lock', '1')
+  try { (document.head || document.documentElement).appendChild(lockEl) } catch { /* ignore */ }
+
   if (window.__studyBuddyFocusMode) return
   window.__studyBuddyFocusMode = true
 
@@ -116,14 +139,13 @@
     //    didn't interact with the document before."
     //
     // 原逻辑（错的）：静音 play 成功后，300ms 后把 muted 设回 false。
-    // 浏览器的自动播放策略是：无用户手势时允许**静音**播放，但一旦有声就
-    // **强制暂停**并抛这个错。而这个扩展每 1 秒轮询「有没有暂停」，
-    // 于是形成死循环：播 → 取消静音被暂停 → 检测到暂停 → 再播 → 再取消静音…
-    // 结果是**视频永远播不动**，浏览器错误页还会堆满红色报错。
+    // 浏览器自动播放策略：无用户手势时允许**静音**播放，一旦有声就**强制暂停**并抛这个错。
+    // 而本扩展每隔一段时间轮询「有没有暂停」，于是形成死循环：
+    //   播 → 取消静音被暂停 → 检测到暂停 → 再播 → 再取消静音…
+    // 结果**视频永远播不动**，浏览器错误页堆满红色报错。
     //
-    // 现在的策略：无手势时静音就一直静音，声音交给用户自己在播放器上开。
-    //   宁可静音把视频播完（学习通按观看时长算进度，不要求有声），
-    //   也不要反复被浏览器暂停。
+    // 现在的策略：无手势时静音就保持静音，声音交给用户自己在播放器上开。
+    //   宁可静音播完（学习通按观看时长算进度，不要求有声），也不要被反复暂停。
     const wasMuted = v.muted
     let hasGesture = false
     try { hasGesture = Boolean(navigator.userActivation && navigator.userActivation.isActive) } catch { /* ignore */ }
@@ -149,37 +171,8 @@
 
   /* ───────── 主循环 ───────── */
 
-  /**
-   * 页面上是否已经有「完整版学习通学伴」的扩展在工作。
-   * 判据：它的 content.js 会创建 #__studybuddy_badge 角标。
-   *
-   * 为什么需要这个：用户可能先只装了本扩展（防暂停），后来又想用完整应用。
-   * 那时候两个扩展都会注入本脚本，各跑一份续播循环 —— 虽然结果一样，
-   * 但会出现两个角标、两次 play() 调用。这里让它自动让位：
-   * 一旦发现完整版在场，自己就停手、把自己的角标也收起来。
-   */
-  function mainExtensionPresent() {
-    return Boolean(document.getElementById('__studybuddy_badge'))
-  }
-
-  let yielded = false
-  function hideOwnBadge() {
-    const own = document.getElementById('__sb_focus_host')
-    if (own) own.style.display = 'none'
-  }
-  function showOwnBadge() {
-    const own = document.getElementById('__sb_focus_host')
-    if (own) own.style.display = ''
-  }
-
   function tick() {
     if (isOff()) return
-    // 完整版在场 → 让位，不重复续播
-    if (mainExtensionPresent()) {
-      if (!yielded) { yielded = true; hideOwnBadge() }
-      return
-    }
-    if (yielded) { yielded = false; showOwnBadge() }
     let v = null
     try { v = findVideo() } catch { return }
     if (!v) return
@@ -201,44 +194,33 @@
     }
   }, true)
 
-  /* ───────── 角标开关（可关掉守护） ───────── */
-
-  /**
-   * 找到（或创建）用来挂「守护中」按钮的容器。
-   * - 装了完整版「学习通学伴」时，页面里已有 #__studybuddy_badge，直接挂上去，外观统一；
-   * - 只装这个独立扩展时，没有那个角标，就自己造一个最小胶囊，
-   *   否则用户没有「关掉自动续播」的入口（这是拆出来单独用时的真实缺陷）。
-   */
-  function ensureKillSwitchHost() {
-    const mainBadge = document.getElementById('__studybuddy_badge')
-    if (mainBadge) return mainBadge
-    let host = document.getElementById('__sb_focus_host')
-    if (host) return host
-    if (!document.body) return null
-    host = document.createElement('div')
-    host.id = '__sb_focus_host'
-    host.style.cssText = [
-      'position:fixed', 'right:16px', 'top:76px', 'z-index:2147483646',
-      'display:flex', 'align-items:center', 'gap:6px',
-      'padding:4px 8px', 'border-radius:8px',
-      'background:rgba(20,22,26,.88)', 'border:1px solid rgba(255,255,255,.12)',
-      'box-shadow:0 2px 10px rgba(0,0,0,.3)',
-      'font:12px/1.4 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif',
-      'color:#cfd6e2', 'user-select:none',
-    ].join(';')
-    const label = document.createElement('span')
-    label.textContent = '📚 防暂停'
-    label.style.cssText = 'opacity:.85'
-    host.appendChild(label)
-    document.body.appendChild(host)
-    return host
-  }
+  /* ───────── 状态指示（独立版没有完整版的角标，自建一个） ───────── */
 
   function attachKillSwitch() {
-    // 完整版在场时不必再挂按钮（它自己会挂一个）
-    if (yielded || mainExtensionPresent()) return
-    const badge = ensureKillSwitchHost()
-    if (!badge || badge.querySelector('.__sb_focus_btn')) return
+    /* ★ 2026-10-25：再加一道「全页唯一」保险——
+       原来只检查 badge 内是否有按钮，若另一份扩展把按钮插到了别处就会重复。 */
+    try { if (document.querySelectorAll('.__sb_focus_btn').length > 0) return } catch { /* ignore */ }
+
+    /* 独立版：没有完整版角标时，自建一个最小容器来承载开关 */
+    let badge = document.getElementById('__studybuddy_badge')
+    if (!badge) {
+      badge = document.createElement('div')
+      badge.id = '__studybuddy_focus_badge'
+      badge.style.cssText = [
+        'position:fixed', 'right:14px', 'bottom:16px', 'z-index:2147483646',
+        'display:flex', 'align-items:center', 'gap:6px',
+        'padding:5px 8px', 'border-radius:8px',
+        'background:rgba(24,27,34,.92)', 'color:#dde1e6',
+        'font:12px/1.4 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif',
+        'box-shadow:0 4px 14px rgba(0,0,0,.3)',
+      ].join(';')
+      const label = document.createElement('span')
+      label.textContent = '🛡 专注模式'
+      label.style.cssText = 'opacity:.85'
+      badge.appendChild(label)
+      document.documentElement.appendChild(badge)
+    }
+    if (badge.querySelector('.__sb_focus_btn')) return
 
     const btn = document.createElement('button')
     btn.className = '__sb_focus_btn'

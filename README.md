@@ -78,7 +78,7 @@
 > | 下载 | `study-buddy.zip`（652 KB） | `study-buddy-focus-only.zip`（4.8 KB） |
 > | 解压后文件数 | **49 个** | **2 个** |
 > | 加载哪个目录 | `<解压目录>\app\extension`（13 文件） | 解压根目录（2 文件） |
-> | 扩展列表显示名 | **学习通学伴 0.6.6** | 学习通防暂停（专注模式）1.0.0 |
+> | 扩展列表显示名 | **学习通学伴 0.7.0** | 学习通防暂停（专注模式）1.0.0 |
 > | 页面角标 | 📚 学伴已就绪 + ▶ 一键播放答题 | 防暂停 |
 >
 > 完整版**已经自带防暂停**，不需要再装小扩展。两个同时装会出现两个角标。
@@ -236,7 +236,7 @@ git clone https://github.com/qeifb/study-buddy.git E:\study-buddy
 > <解压目录>\app\extension
 > ```
 >
-> 选对后，`edge://extensions` 里应该出现 **「学习通学伴 0.6.6」**，
+> 选对后，`edge://extensions` 里应该出现 **「学习通学伴 0.7.0」**，
 > 完整版解压后应能看到 **`app`、`tools`、`docs`、`README.md`** 这几项。
 > 并且这个目录里应该有 **13 个文件**（能看到 `auto-pilot.js`、`pilot-core.js`、`font-table.js` 等）。
 >

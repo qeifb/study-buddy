@@ -31,7 +31,39 @@ const DEFAULTS = {
    * qwen-vl-max-latest / qwen2.5-vl-* 返回 403 Access denied（未开通）。
    */
   visionModel: 'qwen3-vl-plus',
+  /* ★ 2026-10-25：识图可以单独配地址和 Key（不同厂商）
+   *   留空 = 沿用上面「对话模型」的 baseUrl / apiKey，老配置不受影响。 */
+  visionBaseUrl: '',
+  visionApiKey: '',
   apiKey: '',
+
+  /**
+
+   * 硬件加速（2026-10-25 新增）
+
+   *
+
+   * hardwareAccel：总开关，默认开启，照顾大众（有 NVIDIA 显卡就自动用 GPU）
+
+   * accelMode：精细控制，照顾特殊用户
+
+   *   'auto' → 有 NVIDIA GPU 就用，没有就 CPU（推荐）
+
+   *   'gpu'  → 强制 GPU，失败则报错不降级（用户明确知道自己有独显）
+
+   *   'cpu'  → 强制 CPU（集显笔记本、GPU 被游戏占满、远程桌面、虚拟机等）
+
+   *
+
+   * 注：ctranslate2 只支持 NVIDIA CUDA。AMD 显卡 / Intel 集显会自动走 CPU，
+
+   *     无法通过配置启用，这是底层库的限制。
+
+   */
+
+  hardwareAccel: true,
+
+  accelMode: 'auto',
   /** 系统提示词：约束「不遗漏不虚报不弄虚作假」 */
   systemPrompt: [
     '你是一名课程学习助手，服务对象是在学习通上看网课的学生。',
@@ -314,9 +346,14 @@ async function testConnection({ baseUrl, model, apiKey } = {}) {
  */
 async function recognizeImage(imageDataUrl) {
   const s = readSettings()
-  const base = String(s.baseUrl || DEFAULTS.baseUrl).trim().replace(/\/+$/, '')
+  /* ★ 2026-10-25：识图优先用自己的地址与 Key
+   *   —— 用户可能对话用阿里云、识图用别家（或反过来）。
+   *   留空时回退到对话模型的配置，保证老配置可用。 */
+  const vBase = String(s.visionBaseUrl || '').trim()
+  const base = String((vBase || s.baseUrl || DEFAULTS.baseUrl)).trim().replace(/\/+$/, '')
   const model = String(s.visionModel || DEFAULTS.visionModel).trim()
-  const key = String(resolveKey() || '').trim()
+  const vKey = String(s.visionApiKey || '').trim()
+  const key = String(vKey || resolveKey() || '').trim()
   if (!key) return { ok: false, text: '', error: '还没有配置模型 API Key。请在左下角「设置」里填写。' }
   if (!imageDataUrl) return { ok: false, text: '', error: '没有拿到图片' }
   const t0 = Date.now()
@@ -358,4 +395,92 @@ async function recognizeImage(imageDataUrl) {
   }
 }
 
-module.exports = { chat, testConnection, recognizeImage, readSettings, writeSettings, DEFAULTS, SETTINGS, buildContext }
+/**
+ * 测试识图模型能否使用（2026-10-25 新增）
+ *
+ * 用一张最小的 1x1 PNG 发一次真实的多模态请求。
+ * 目的是验证：地址通、Key 有效、这个模型**确实支持图片输入**。
+ *
+ * 为什么不能只测文字模型：很多厂商的文字模型和视觉模型是两套权限，
+ * 文字能通不代表识图能用（本例：qwen-vl-max 会 404 Model not exist）。
+ */
+async function testVision({ visionBaseUrl, visionApiKey, visionModel } = {}) {
+  const s = readSettings()
+  const vBase = String(visionBaseUrl != null ? visionBaseUrl : (s.visionBaseUrl || '')).trim()
+  const base = String(vBase || s.baseUrl || DEFAULTS.baseUrl).trim().replace(/\/+$/, '')
+  const model = String(visionModel || s.visionModel || DEFAULTS.visionModel).trim()
+  const vKey = String(visionApiKey != null ? visionApiKey : (s.visionApiKey || '')).trim()
+  const key = String(vKey || resolveKey() || '').trim()
+  const t0 = Date.now()
+
+  if (!/^https?:\/\//i.test(base)) {
+    return { ok: false, ms: 0, base, model, error: '识图地址要以 http:// 或 https:// 开头' }
+  }
+  if (!key) return { ok: false, ms: 0, base, model, error: '还没有填识图用的 API Key（如果和对话模型同一家，可留空）' }
+  if (!model) return { ok: false, ms: 0, base, model, error: '还没有填识图模型名' }
+
+  /* ★ 2026-10-25：用 32×32 而不是 1×1
+   *   实测阿里云百炼会拒绝 1×1：InternalError.Algo.InvalidParameter:
+   *   "The image length and width do not meet the model restrictions.
+   *    [height:1 or width:1 must be larger than 10]"
+   *   → 1×1 会导致「明明 Key 正确也报错」，误导用户以为模型不支持识图。 */
+  const PNG_TEST = 'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAACAAAAAgCAIAAAD8GO2jAAAAKklEQVR4nGO4o6FBU8QwasGoBaMWjFowasGoBaMWjFowasGoBaMWDBULAIahsD2ItTF0AAAAAElFTkSuQmCC'
+
+  try {
+    const res = await fetch(`${base}/chat/completions`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${key}` },
+      body: JSON.stringify({
+        model,
+        messages: [{
+          role: 'user',
+          content: [
+            { type: 'text', text: '这张图是什么颜色？只回答颜色。' },
+            { type: 'image_url', image_url: { url: PNG_TEST } },
+          ],
+        }],
+        max_tokens: 20,
+        temperature: 0,
+        stream: false,
+      }),
+      signal: AbortSignal.timeout(60000),
+    })
+    const ms = Date.now() - t0
+    const text = await res.text()
+    let json = null
+    try { json = JSON.parse(text) } catch { /* 非 JSON */ }
+
+    if (!res.ok) {
+      const raw = json?.error?.message || json?.message || json?.error || (text || '').slice(0, 300)
+      const msg = typeof raw === 'string' ? raw : JSON.stringify(raw)
+      const hint =
+        res.status === 401 ? 'Key 不对或已过期' :
+        res.status === 403 ? '这把 Key 没有权限用这个视觉模型' :
+        res.status === 404 ? '地址或模型名不对（有的厂商视觉模型路径不同）' :
+        res.status === 429 ? '请求太频繁或额度用尽' :
+        res.status >= 500 ? '服务端临时故障' :
+        /height.*width|image size|resolution|too small/i.test(msg) ? '测试图片尺寸不符合该模型要求（可换用其他模型试）' :
+        /does not support|not support.*image|invalid.*model.*type|multimodal/i.test(msg) ? '这个模型不支持图片输入，请换一个视觉模型' :
+        /image|vision/i.test(msg) ? '识图请求被拒（详见下方原始错误）' : ''
+      return { ok: false, ms, status: res.status, base, model, error: hint ? `${hint}｜${msg}` : (msg || `HTTP ${res.status}`) }
+    }
+
+    const reply = json?.choices?.[0]?.message?.content ?? ''
+    if (!reply && !json?.choices) {
+      return { ok: false, ms, status: res.status, base, model, error: '接口返回 200 但不是 OpenAI 兼容格式（没有 choices），请检查地址' }
+    }
+    return { ok: true, ms, status: res.status, base, model, reply: String(reply).trim().slice(0, 60) }
+  } catch (e) {
+    const msg = String(e?.message || e)
+    const detail = [e?.cause?.code, e?.cause?.message].filter(Boolean).join(' ')
+    const all = detail ? `${msg} ${detail}` : msg
+    const friendly = /timeout|abort/i.test(all) ? `请求超时（60 秒）：地址不通或被拦｜${all}`
+      : /ENOTFOUND|getaddrinfo/i.test(all) ? `域名解析失败｜${all}`
+      : /ECONNREFUSED/i.test(all) ? `连接被拒绝｜${all}`
+      : /certificate|SSL|TLS/i.test(all) ? `证书校验失败｜${all}`
+      : all
+    return { ok: false, ms: Date.now() - t0, base, model, error: friendly }
+  }
+}
+
+module.exports = { chat, testConnection, testVision, recognizeImage, readSettings, writeSettings, DEFAULTS, SETTINGS, buildContext }

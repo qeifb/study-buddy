@@ -1656,6 +1656,7 @@
     diag.logStage = 'capturing'
     const t0 = Date.now()
     let lastText = ''
+    let lastSegCount = 0
     let pollFail = 0        // 连续轮询失败次数
     let lastStage = ''
 
@@ -1684,10 +1685,19 @@
       const b = s.body
       diag.logStage = `${b.stage || ''} ${b.segments || 0}`
       if (b.stage) lastStage = b.stage
-      // 只在文案变化时提示，避免每 1 秒 flash 一次刷屏
+      // ★ 2026-10-25：扩展端「100 段报一次」
+      //   原来只要文案变了就 flash，而「已转写 N 段」每 20 段就变一次，
+      //   页面角标会频繁闪烁。这里按段数节流：不到 100 段不重复提示。
       if (b.text && b.text !== lastText) {
-        lastText = b.text
-        flash(`📚 ${b.text}`, 'info')
+        const segNow = Number(b.segments || 0)
+        const isFirst = !lastText
+        const isFinal = b.done === true
+        const crossed100 = segNow - lastSegCount >= 100
+        if (isFirst || isFinal || crossed100) {
+          lastText = b.text
+          if (isFinal || crossed100) lastSegCount = segNow
+          flash(`📚 ${b.text}`, 'info')
+        }
       }
       if (b.done) {
         if (b.error) return { ok: false, reason: 'capture-failed', msg: b.error }
@@ -1700,6 +1710,89 @@
       reason: 'log-timeout',
       msg: `抓取课程日志超时（已等 ${waited} 秒，最后阶段：${lastStage || '未知'}）`,
     }
+  }
+
+  /* ── 播放期间预抓日志（2026-10-25 新增）──
+   *
+   * 在视频还没播完时就发起一次 autoCapture，把下载+转写提前做完，
+   * 播完后 ensureLog 会因「已有日志」秒返回 reused，立刻进入答题。
+   *
+   * 设计要点：
+   *   · 每章只发一次（preLogState.chapterId 记录），不会每秒重发
+   *   · 不 await，绝不阻塞播放
+   *   · 失败静默 —— 播完还会正经抓一次，预抓失败不影响正确性
+   *   · 复用应用端已有的 findByChapterId 机制，重复调用也只会真正抓一次 */
+  const preLogState = { chapterId: '', startedAt: 0, done: false, failedAt: 0, ok: false, skipReason: '' }
+
+  function prefetchLogIfNeeded(ch, ratio) {
+    /* ★ 2026-10-25：每个提前 return 都要留下痕迹。
+       用户报「又不会边播边下载了」，而旧代码静默 return，日志里什么都看不到，
+       完全无法判断是「开关关着」「拿不到 chapterId」还是「进度太早」。 */
+    const skip = (why) => {
+      preLogState.skipReason = why
+      if (diag) diag.prefetch = 'skip:' + why
+      return
+    }
+
+    if (!CFG.prefetchLog) return skip('开关关闭')
+    if (!ch) return skip('当前章节为空')
+    if (!ch.chapterId) return skip('章节 ID 为空（onclick 解析失败）')
+
+    const sameChapter = preLogState.chapterId === ch.chapterId
+
+    // 同一章已经成功发起过 → 不再重复
+    if (sameChapter && preLogState.ok) return skip('本章已发起过')
+
+    // ★ 同一章失败过：冷却 20 秒再重试
+    if (sameChapter && !preLogState.ok && preLogState.failedAt) {
+      const age = Date.now() - preLogState.failedAt
+      if (age < 20000) return skip('失败冷却中 ' + Math.round(age / 1000) + 's')
+    }
+
+    // 比例检查只对「播放中」的调用生效；启动时传 null 表示立刻抓
+    if (ratio != null && ratio < CFG.prefetchMinRatio) {
+      return skip('进度太早 ' + (ratio * 100).toFixed(1) + '%')
+    }
+
+    preLogState.chapterId = ch.chapterId
+    preLogState.startedAt = Date.now()
+    preLogState.ok = false
+    preLogState.failedAt = 0
+
+    ;(async () => {
+      try {
+        const tabId = await currentTabId()
+        const r = await apiPost('/ext/autoCapture', {
+          url: location.href,
+          chapterId: ch.chapterId,
+          tabId: tabId == null ? undefined : tabId,
+        }, 20000)
+        if (r.body && r.body.ok) {
+          preLogState.ok = true
+          preLogState.skipReason = ''
+          if (r.body.reused) {
+            diag.prefetch = 'reused'
+            LOG('预抓：本章已有日志，播完可直接答题')
+          } else if (r.body.jobId) {
+            diag.prefetch = 'started'
+            flash('📥 已在后台准备这一节的文字稿（边播边下载，播完可直接答题）', 'info')
+            LOG('预抓已发起 jobId=' + r.body.jobId)
+          }
+        } else {
+          preLogState.ok = false
+          preLogState.failedAt = Date.now()
+          diag.prefetch = 'failed'
+          LOG('预抓未成功（20 秒后会重试；不影响播放）', r.body?.error || r.netError)
+        }
+      } catch (e) {
+        preLogState.ok = false
+        preLogState.failedAt = Date.now()
+        diag.prefetch = 'error'
+        LOG('预抓异常（20 秒后会重试；不影响播放）', e?.message)
+      } finally {
+        preLogState.done = true
+      }
+    })()
   }
 
   /* ═══════════════════════ 主状态机 ═══════════════════════ */
@@ -1734,6 +1827,12 @@
       if (!started) {
         return { ok: false, reason: 'cannot-play' }
       }
+      /* ★ 2026-10-25：刚开始播放就立刻预抓一次，争取最大并行时间窗。
+       * 主循环里还会按比例再次尝试（同一章只发一次，不会重复）。 */
+      /* 传 null 而不是 0：0 会被「ratio < prefetchMinRatio」的检查拦掉
+         （minRatio=0.02，0 < 0.02 为真 → 直接 return，预抓从未真正发起过）。
+         null 表示「不检查播放进度，立刻抓」。 */
+      try { prefetchLogIfNeeded(ch, null) } catch { /* ignore */ }
       return { ok: true, playing: true }
     }
 
@@ -1872,6 +1971,10 @@
           // 还没到 90% 就继续播放，不进入答题
           if (s.ratio < CFG.doneRatio && !s.ended) {
             if (v.paused) await ensurePlaying()
+            /* ★ 2026-10-25：播放期间就预抓日志（边播边下载+转写）。
+             * 原来「播完才开始下载」，14 分钟视频还要再等 ~90 秒；
+             * 现在并行准备，播完 ensureLog 直接 reused，立刻答题。 */
+            try { prefetchLogIfNeeded(currentChapter(), s.ratio) } catch { /* 绝不影响播放 */ }
             return
           }
           // 播放到 90% 以上：再确认任务点是否真的完成了

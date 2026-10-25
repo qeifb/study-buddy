@@ -19,7 +19,7 @@ const { launchDedicated, closeDedicated } = require('./core/launcher')
 const { createExtServer, DEFAULT_PORT: EXT_DEFAULT_PORT } = require('./core/extserver')
 const { captureLesson, captureLessonViaExtension } = require('./core/capture')
 const { store } = require('./core/store')
-const { chat, readSettings, writeSettings, testConnection, recognizeImage } = require('./core/ai')
+const { chat, readSettings, writeSettings, testConnection, testVision, recognizeImage } = require('./core/ai')
 const lessons = require('./core/lessons')
 
 const APP_DIR = __dirname
@@ -46,7 +46,7 @@ const LEGACY_DIR = path.join(app.getPath('appData'), 'study-buddy', 'study-buddy
  *   `Lock file can not be created: 拒绝访问 (0x5)`
  *   `Failed to create directory: ...\Code Cache\js`
  */
-const { RUNTIME_DIR, DATA_DIR, NOTES_DIR, TOOLS_DIR } = require('./core/paths')
+const { RUNTIME_DIR, DATA_DIR, NOTES_DIR, TOOLS_DIR, ROOT } = require('./core/paths')
 
 /**
  * 关键流程写一份滚动日志到 <data>\app.log。
@@ -111,6 +111,81 @@ function migrateLegacyData() {
 
 let win = null
 let currentCapture = null
+
+/**
+ * 抓取任务仲裁器（2026-10-25 新增）
+ *
+ * 规则（用户要求）：
+ *   自动抓取（浏览器插件「一键播放答题」触发）**优先级高于**手动抓取：
+ *   · 自动在跑 → 手动直接拒绝，提示「自动抓取进行中，请等它完成」
+ *   · 手动在跑 → 自动排队等待，手动完成后立刻接着跑
+ *
+ * 为什么需要它：原来两套锁独立（autoCaptureRunning / currentCapture），
+ * 两边会同时下载 + 转写同一节课的视频，抢 CPU 和带宽，且可能写同一个日志文件。
+ */
+const captureArbiter = {
+  autoRunning: 0,        // 正在进行的自动抓取数量（可能多章并行）
+  manualRunning: false,  // 手动抓取是否在进行
+  autoWaiters: [],       // 等待手动完成的自动抓取回调
+  lastAutoStart: 0,
+  lastManualStart: 0,
+
+  /** 手动抓取能否开始：只有自动抓取在跑时才拒绝 */
+  canStartManual() {
+    if (this.autoRunning > 0) {
+      return { ok: false, reason: 'auto-busy', message: '浏览器插件正在自动抓取课程日志，请等它完成后重试（自动抓取优先级更高）' }
+    }
+    if (this.manualRunning) {
+      return { ok: false, reason: 'manual-busy', message: '已有手动抓取任务在进行中' }
+    }
+    return { ok: true }
+  },
+
+  beginManual() {
+    this.manualRunning = true
+    this.lastManualStart = Date.now()
+  },
+
+  /** 手动结束：唤醒所有排队的自动抓取 */
+  endManual() {
+    this.manualRunning = false
+    const waiters = this.autoWaiters.splice(0)
+    for (const w of waiters) {
+      try { w() } catch { /* ignore */ }
+    }
+  },
+
+  /**
+   * 自动抓取等待手动完成（若手动在跑）
+   * 返回一个 Promise，手动结束后 resolve。
+   * 加超时保护：最多等 10 分钟，避免手动任务卡死导致自动永久挂起。
+   */
+  waitForManual(timeoutMs = 600000) {
+    if (!this.manualRunning) return Promise.resolve()
+    return new Promise((resolve) => {
+      let done = false
+      const timer = setTimeout(() => {
+        if (done) return
+        done = true
+        appendAppLog('[arbiter] 等待手动抓取超时（10 分钟），自动抓取继续执行')
+        resolve()
+      }, timeoutMs)
+      this.autoWaiters.push(() => {
+        if (done) return
+        done = true
+        clearTimeout(timer)
+        resolve()
+      })
+    })
+  },
+
+  beginAuto() { this.autoRunning++; this.lastAutoStart = Date.now() },
+  endAuto() { this.autoRunning = Math.max(0, this.autoRunning - 1) },
+
+  snapshot() {
+    return { autoRunning: this.autoRunning, manualRunning: this.manualRunning, waitingAuto: this.autoWaiters.length }
+  },
+}
 let ext = null
 let extPort = EXT_DEFAULT_PORT
 let tray = null
@@ -876,6 +951,19 @@ async function handleAutoCapture({ body }) {
   // 不等它跑完（会 1-3 分钟），后台继续
   ;(async () => {
     try {
+      /* ★ 2026-10-25：自动抓取优先级高，但若手动抓取正在进行，
+         则排队等它做完（用户要求：「若用户先进行手动抓取就正常抓取完，
+         再进行浏览器扩展自动抓取」）。
+         注意：jobId 已交给扩展，扩展会轮询 status，进度会正常推进。 */
+      if (captureArbiter.manualRunning) {
+        appendAppLog('[autocapture] 手动抓取进行中，自动抓取排队等待 jobId=' + jobId)
+        ext.captureJobs.update(jobId, { stage: 'queue', text: '手动抓取进行中，正在排队等待…' })
+        notifyRenderer('stage', { stage: 'queue', text: '手动抓取进行中，正在排队等待…' })
+        await captureArbiter.waitForManual()
+        appendAppLog('[autocapture] 手动已完成，继续自动抓取 jobId=' + jobId)
+        notifyRenderer('stage', { stage: 'scan', text: '手动抓取已完成，开始自动抓取…' })
+      }
+      captureArbiter.beginAuto()
       ext.captureJobs.update(jobId, { stage: 'scan', text: '正在通过浏览器插件读取当前页面…' })
       notifyRenderer('stage', { stage: 'scan', text: '正在通过浏览器插件读取当前页面…' })
       const result = await captureLessonViaExtension({
@@ -904,15 +992,29 @@ async function handleAutoCapture({ body }) {
       })
       ext.captureJobs.finish(jobId, { ok: true, file: result.file ? path.basename(result.file) : null })
       appendAppLog(`[autocapture] 完成 《${result.lessonName || ''}》 chapterId=${result.chapterId || ''} 段数=${result.segments ?? '?'}`)
+      const fmtDur = (s) => {
+        const n = Math.round(Number(s) || 0)
+        return String(Math.floor(n / 60)).padStart(2, '0') + ':' + String(n % 60).padStart(2, '0')
+      }
       notifyRenderer('done', {
         chapterId: result.chapterId || chapterIdFromBody,
         title: result.lessonName || '',
+        /* ★ 2026-10-25：补 course / duration / chars
+         * 用户要求「在对话区按智能体回答展示，并做出图1 那种卡片」，
+         * 卡片要显示课程名、时长、转写段数/字数，原来只送了 title/segments/file。 */
+        course: result.courseName || '',
+        duration: result.duration ? fmtDur(result.duration) : '',
         segments: result.segments || 0,
+        chars: result.chars || 0,
         file: result.file ? path.basename(result.file) : '',
+        fullPath: result.file || '',
+        reused: result.reused === true,
         text: `课程日志已就绪：《${result.lessonName || ''}》${result.segments ? `（${result.segments} 段）` : ''}`,
       })
+      captureArbiter.endAuto()
     } catch (e) {
       finishFail(String(e?.message || e), { url: url.slice(0, 100) })
+      captureArbiter.endAuto()
     }
   })()
 
@@ -1258,38 +1360,6 @@ function setAutoStart(enabled) {
     return true
   } catch { return false }
 }
-
-/**
- * 加载托盘图标。
- *
- * 2026-10-22 关键排查结论：
- *   `nativeImage.createFromBuffer(拼的像素)` 得到的图 **isEmpty=false、32x32、PNG 456字节**，
- *   `new Tray(icon)` 也不报错，但 **注册表 `HKCU:\Control Panel\NotifyIconSettings` 里
- *   根本查不到这个应用的托盘项** —— 说明图标没被系统真正接纳。
- *   改用**真实 .ico 文件**（assets/tray.ico）加载，这是 Windows 托盘最稳的格式。
- */
-function loadTrayIcon() {
-  const candidates = [
-    path.join(APP_DIR, 'assets', 'tray.ico'),
-    path.join(APP_DIR, 'assets', 'tray.png'),
-  ]
-  for (const p of candidates) {
-    try {
-      if (!fs.existsSync(p)) continue
-      const img = nativeImage.createFromPath(p)
-      if (!img.isEmpty()) {
-        console.log(`[study-buddy] 托盘图标已加载: ${p} (${JSON.stringify(img.getSize())})`)
-        return img
-      }
-      console.error(`[study-buddy] 图标文件存在但为空: ${p}`)
-    } catch (e) {
-      console.error(`[study-buddy] 加载图标失败 ${p}:`, e?.message || e)
-    }
-  }
-  // 兜底：程序生成
-  console.error('[study-buddy] 没有可用的图标文件，回退到程序生成的图标')
-  return buildTrayIcon(1)
-}
 function buildTrayIcon(badge) {
   try {
     const size = 32
@@ -1473,6 +1543,17 @@ ipcMain.handle('chats:markCapture', async (_e, { id, lesson }) => store.markCapt
 ipcMain.handle('settings:load', async () => readSettings())
 ipcMain.handle('settings:save', async (_e, patch) => writeSettings(patch || {}))
 // 一键测试：用界面上当前填的地址/模型/Key 真实请求一次，不落盘
+/* 识图模型连通性测试（2026-10-25 新增）
+ * 用户可能给识图单独配厂商/地址/Key，所以要用独立的测试入口，
+ * 且必须发真实的多模态请求（1x1 PNG）——文字模型能通不代表视觉模型能用。 */
+ipcMain.handle('vision:test', async (_e, payload) => {
+  try {
+    return await testVision(payload || {})
+  } catch (e) {
+    return { ok: false, ms: 0, error: String(e?.message || e) }
+  }
+})
+
 ipcMain.handle('settings:test', async (_e, payload) => {
   const r = await testConnection(payload || {})
   appendAppLog(`[settings:test] ok=${r.ok} status=${r.status || '-'} ${r.ms}ms ${r.model || ''} ${r.error || ''}`)
@@ -1511,6 +1592,115 @@ function transcribePaths() {
     modelDir: path.join(TOOLS_DIR, 'models', 'large-v3-turbo'),
   }
 }
+
+/**
+ * 磁盘占用自检（2026-10-25 新增）
+ *
+ * 动机：用户问「应用会不会往 C 盘塞缓存/日志/视频，且不会自动删」。
+ * 答案是不会（所有数据都在 <root> 下），但用户看不到证据。
+ * 这个接口把「程序目录占用」和「C 盘残留」都统计出来，让用户自己能看。
+ */
+function dirUsage(dir, depth = 0) {
+  const out = { bytes: 0, files: 0 }
+  if (!dir || depth > 10) return out
+  let items = []
+  try { items = fs.readdirSync(dir, { withFileTypes: true }) } catch { return out }
+  for (const it of items) {
+    const p = path.join(dir, it.name)
+    try {
+      if (it.isDirectory()) {
+        const sub = dirUsage(p, depth + 1)
+        out.bytes += sub.bytes
+        out.files += sub.files
+      } else {
+        out.bytes += fs.statSync(p).size
+        out.files++
+      }
+    } catch { /* ignore */ }
+  }
+  return out
+}
+
+/**
+ * 一键清理 C 盘残留（2026-10-25 新增）
+ *
+ * 只做一件事：调用项目自带的 clean-cache.ps1，
+ * 不带 -KeepDays 0（默认 30 天），避免误删最近还在用的文件。
+ * 绝不碰 data/（课程日志、聊天记录、API Key）。
+ */
+ipcMain.handle('disk:cleanCdrive', async () => {
+  const script = path.join(ROOT, 'clean-cache.ps1')
+  if (!fs.existsSync(script)) {
+    return { ok: false, error: '找不到 clean-cache.ps1，压缩包可能不完整' }
+  }
+  return new Promise((resolve) => {
+    const ps = require('node:child_process').execFile
+    ps('powershell.exe', [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', script,
+      '-KeepDays', '30',
+    ], { windowsHide: true, timeout: 300000, maxBuffer: 4 * 1024 * 1024 }, (err, stdout, stderr) => {
+      if (err) {
+        resolve({ ok: false, error: String(stderr || err.message || '').slice(0, 2000) })
+        return
+      }
+      // 从输出里抓「已释放 xxx」
+      const text = String(stdout || '')
+      const m = /已释放\s*([\d.]+\s*[KMG]B)/.exec(text)
+      resolve({
+        ok: true,
+        freed: m ? m[1] : '',
+        output: text.slice(-4000),
+      })
+    })
+  })
+})
+
+ipcMain.handle('disk:usage', async () => {
+  const fmt = (b) => {
+    if (b >= 1073741824) return (b / 1073741824).toFixed(2) + ' GB'
+    if (b >= 1048576) return (b / 1048576).toFixed(1) + ' MB'
+    if (b >= 1024) return (b / 1024).toFixed(0) + ' KB'
+    return b + ' B'
+  }
+
+  // ① 程序目录各部分
+  const parts = []
+  for (const name of ['data', 'runtime', 'browser-profile', 'cache', 'tools', 'archive']) {
+    const p = path.join(ROOT, name)
+    if (!fs.existsSync(p)) continue
+    const u = dirUsage(p)
+    parts.push({ name, path: p, bytes: u.bytes, files: u.files, text: fmt(u.bytes) })
+  }
+  const rootTotal = parts.reduce((a, x) => a + x.bytes, 0)
+
+  // ② C 盘残留（只查已知位置，不做全盘扫描）
+  const cparts = []
+  const candidates = [
+    ['旧版数据 (Roaming)', path.join(process.env.APPDATA || '', 'study-buddy')],
+    ['旧版数据 (Roaming)', path.join(process.env.APPDATA || '', 'dsh-study-companion')],
+    ['旧版数据 (Local)', path.join(process.env.LOCALAPPDATA || '', 'study-buddy')],
+    ['旧版数据 (Local)', path.join(process.env.LOCALAPPDATA || '', 'dsh-study-companion')],
+    ['HuggingFace 缓存', path.join(process.env.USERPROFILE || '', '.cache', 'huggingface')],
+    ['Electron 下载缓存', path.join(process.env.LOCALAPPDATA || '', 'electron')],
+    ['pip 缓存', path.join(process.env.LOCALAPPDATA || '', 'pip', 'cache')],
+  ]
+  for (const [label, p] of candidates) {
+    if (!p || !fs.existsSync(p)) continue
+    const u = dirUsage(p)
+    if (u.bytes > 0) cparts.push({ name: label, path: p, bytes: u.bytes, files: u.files, text: fmt(u.bytes) })
+  }
+  const cTotal = cparts.reduce((a, x) => a + x.bytes, 0)
+
+  return {
+    root: ROOT,
+    parts,
+    rootTotal: { bytes: rootTotal, text: fmt(rootTotal) },
+    cdrive: cparts,
+    cdriveTotal: { bytes: cTotal, text: fmt(cTotal) },
+    cleanScript: path.join(ROOT, 'clean-cache.ps1'),
+    hasCleanScript: fs.existsSync(path.join(ROOT, 'clean-cache.ps1')),
+  }
+})
 
 ipcMain.handle('transcribe:status', async () => {
   const p = transcribePaths()
@@ -1616,6 +1806,13 @@ ipcMain.handle('browsers:openLogin', async () => {
 
 // 课程日志：抓取 + 分析
 ipcMain.handle('capture:start', async (event, { chatId, browserId, tabId, via, reuse = true }) => {
+  /* ★ 2026-10-25：自动抓取优先级更高。
+     自动在跑时不允许手动抓取（避免两边同时下载转写同一节课）。 */
+  const gate = captureArbiter.canStartManual()
+  if (!gate.ok) {
+    appendAppLog('[capture] 手动抓取被拒：' + gate.reason)
+    return { ok: false, error: gate.message, busyBy: gate.reason }
+  }
   if (currentCapture) return { ok: false, error: '已有抓取任务在进行中' }
   const sender = event.sender
   const send = (type, payload) => {
@@ -1624,6 +1821,7 @@ ipcMain.handle('capture:start', async (event, { chatId, browserId, tabId, via, r
   }
 
   currentCapture = { chatId, browserId, tabId, via, startedAt: Date.now() }
+  captureArbiter.beginManual()
   appendAppLog(`[capture:start] chatId=${chatId} via=${via || '(空)'} browserId=${browserId || '(空)'} tabId=${tabId || '(空)'}`)
   try {
     // 优先走浏览器扩展（不需要调试端口）
@@ -1655,18 +1853,21 @@ ipcMain.handle('capture:start', async (event, { chatId, browserId, tabId, via, r
     appendAppLog(`[capture:done] file=${result.file} lesson=${result.lessonName || ''} course=${result.courseName || '(未识别)'} segments=${result.segments ?? '?'}`
       + (result.courseName ? '' : ` candidates=${JSON.stringify(result.courseCandidates || {}).slice(0, 300)}`))
     currentCapture = null
+    captureArbiter.endManual()
     return { ok: true, ...result }
   } catch (e) {
     const msg = String(e?.message || e)
     appendAppLog(`[capture:error] ${msg}\n${e?.stack || ''}`)
     send('stage', { stage: 'error', text: `抓取失败：${msg}` })
     currentCapture = null
+    captureArbiter.endManual()
     return { ok: false, error: msg }
   }
 })
 
 ipcMain.handle('capture:cancel', async () => {
   currentCapture = null
+  captureArbiter.endManual()
   return { ok: true }
 })
 

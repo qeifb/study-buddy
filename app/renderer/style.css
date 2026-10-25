@@ -606,3 +606,38 @@ body.side-collapsed .sidebar { display: none; }
   text-overflow: ellipsis;
 }
 .course-pick select option { background: #1f2126; color: var(--text); }
+
+
+/* 磁盘占用区块 */
+.disk-box { margin-top: 6px; font-size: 12.5px; line-height: 1.7; }
+.disk-part { color: var(--fg-dim, #9aa0a6); }
+.disk-part b { color: var(--fg, #e8eaed); font-weight: 600; }
+.disk-log {
+  margin-top: 8px; padding: 8px 10px; max-height: 160px; overflow: auto;
+  background: rgba(0,0,0,.28); border-radius: 6px;
+  font-size: 11.5px; line-height: 1.55; color: #b8bec6; white-space: pre-wrap;
+}
+
+
+/* 复选框/单选项行 */
+.chk { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; font-size: 12.5px; line-height: 1.6; color: #b8bec6; }
+.chk input { margin-top: 3px; flex: 0 0 auto; }
+.chk span { flex: 1; }
+
+
+/* 设置页的分页标签（2026-10-25 新增） */
+.tabs { display: flex; gap: 4px; padding: 0 0 0 2px; border-bottom: 1px solid rgba(255,255,255,.09); margin-bottom: 14px; }
+.tab {
+  padding: 7px 14px; border: none; background: transparent; cursor: pointer;
+  font: inherit; font-size: 13px; color: #8b9199;
+  border-bottom: 2px solid transparent; margin-bottom: -1px;
+  border-radius: 6px 6px 0 0;
+}
+.tab:hover { color: #dde1e6; background: rgba(255,255,255,.04); }
+.tab.active { color: #8cc4ff; border-bottom-color: #8cc4ff; }
+.tab-pane { display: none; }
+.tab-pane.active { display: block; }
+.pane-title { font-size: 13px; font-weight: 600; color: #dde1e6; margin: 0 0 8px; }
+.pane-divider { height: 1px; background: rgba(255,255,255,.08); margin: 18px 0; }
+.optional { font-weight: 400; color: #8b9199; font-size: 11.5px; }
+.field-tip code { background: rgba(255,255,255,.08); padding: 1px 4px; border-radius: 3px; font-size: 11.5px; }

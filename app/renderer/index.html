@@ -94,46 +94,137 @@
     </div>
   </div>
 
-  <!-- 设置 -->
   <div class="modal-mask" id="modal-settings" hidden>
-    <div class="modal">
+    <div class="modal wide">
       <div class="modal-head">设置</div>
-      <div class="modal-sub">模型只用于「分析课程内容」和「回答你的问题」，课程文件始终留在你电脑上。</div>
+
+      <div class="tabs" id="settings-tabs">
+        <button class="tab active" data-tab="api">API 设置</button>
+        <button class="tab" data-tab="other">其他设置</button>
+      </div>
+
       <div class="modal-body">
-        <div class="field">
-          <label>API 地址</label>
-          <input id="set-base" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1">
-        </div>
-        <div class="field">
-          <label>模型名</label>
-          <input id="set-model" placeholder="qwen-plus">
-        </div>
-        <div class="field">
-          <label>API Key</label>
-          <input id="set-key" type="password" placeholder="sk-...">
-        </div>
-        <div class="field">
-          <label>识图模型</label>
-          <input id="set-vision" placeholder="qwen3-vl-plus">
-          <div class="field-tip">发图片提问时会用这个视觉模型（普通模型看不懂图）。留空则用 qwen3-vl-plus。</div>
-        </div>
-        <div class="field">
-          <label>连接测试</label>
-          <div class="test-row">
-            <button class="btn" id="btn-test-api">🔌 测试 API 能否使用</button>
-            <span class="test-result" id="test-result">用上面填的地址 / 模型名 / Key 真实请求一次，不用先保存</span>
+
+        <!-- ══════════ 第一页：API 设置 ══════════ -->
+        <div class="tab-pane active" id="pane-api">
+
+          <div class="pane-title">对话模型（用来分析课程、回答你的问题）</div>
+
+          <div class="field">
+            <label>API 地址</label>
+            <input id="set-base" placeholder="https://dashscope.aliyuncs.com/compatible-mode/v1">
+            <div class="field-tip">要填到 <code>/v1</code> 这一级，<b>不要</b>带 <code>/chat/completions</code>。</div>
           </div>
-        </div>
-        <div class="field">
-          <label>转写环境（抓取课程时把语音转成文字）</label>
-          <div class="test-row">
-            <button class="btn" id="btn-setup-transcribe">🧩 安装 / 修复转写环境</button>
-            <span class="test-result" id="transcribe-status">正在检查…</span>
+
+          <div class="field">
+            <label>模型名</label>
+            <input id="set-model" placeholder="qwen-plus">
           </div>
-          <div class="field-tip">
-            点一次就自动装好（约 200MB 组件 + 1.6GB 模型，只需装一次）。不装的话，「课程日志」抓取会停在转写那一步。
+
+          <div class="field">
+            <label>API Key</label>
+            <input id="set-key" type="password" placeholder="sk-...">
+            <div class="field-tip">只存在你自己的电脑上（<code>data/settings.json</code>），不会上传。</div>
           </div>
+
+          <div class="field">
+            <label>连接测试</label>
+            <div class="test-row">
+              <button class="btn" id="btn-test-api">🔌 测试对话模型</button>
+              <span class="test-result" id="test-result">用上面填的地址 / 模型名 / Key 真实请求一次，不用先保存</span>
+            </div>
+          </div>
+
+          <div class="pane-divider"></div>
+
+          <div class="pane-title">识图模型（发图片提问时，把图里的文字读出来）</div>
+          <div class="field-tip" style="margin-bottom:10px">
+            普通模型看不懂图，必须用**视觉模型**（如 qwen3-vl-plus、gpt-4o、gemini-2.0-flash）。
+            如果你的识图和对话**不是同一家**，下面三项单独填；否则留空即沿用上面的配置。
+          </div>
+
+          <div class="field">
+            <label>识图模型名</label>
+            <input id="set-vision-model" placeholder="qwen3-vl-plus">
+          </div>
+
+          <div class="field">
+            <label>识图 API 地址 <span class="optional">（留空 = 沿用对话模型）</span></label>
+            <input id="set-vision-base" placeholder="留空则用上面的地址">
+          </div>
+
+          <div class="field">
+            <label>识图 API Key <span class="optional">（留空 = 沿用对话模型）</span></label>
+            <input id="set-vision-key" type="password" placeholder="留空则用上面的 Key">
+          </div>
+
+          <div class="field">
+            <label>识图测试</label>
+            <div class="test-row">
+              <button class="btn" id="btn-test-vision">🖼 测试识图模型</button>
+              <span class="test-result" id="vision-test-result">会真的发一张测试图片过去，验证「这个模型确实能读图」</span>
+            </div>
+            <div class="field-tip">文字模型能通不代表识图能用——很多厂商的文字与视觉模型是两套权限。</div>
+          </div>
+
         </div>
+
+        <!-- ══════════ 第二页：其他设置 ══════════ -->
+        <div class="tab-pane" id="pane-other">
+
+          <div class="pane-title">转写环境（抓取课程时把语音转成文字）</div>
+          <div class="field">
+            <div class="test-row">
+              <button class="btn" id="btn-setup-transcribe">🧩 安装 / 修复转写环境</button>
+              <span class="test-result" id="transcribe-status">正在检查…</span>
+            </div>
+            <div class="field-tip">点一次就自动装好（约 200MB 组件 + 1.6GB 模型，只需装一次）。</div>
+          </div>
+
+          <div class="pane-divider"></div>
+
+          <div class="pane-title">硬件加速</div>
+          <div class="field">
+            <div class="field-tip">有 NVIDIA 独立显卡时，用 GPU 转写比 CPU 快一倍以上。没有独立显卡（AMD / Intel 集显）会自动用 CPU，不影响使用。</div>
+            <label class="chk">
+              <input type="checkbox" id="set-hwaccel" checked>
+              <span>使用硬件加速（推荐开启）</span>
+            </label>
+            <div id="set-accel-wrap" style="margin-top:8px">
+              <label class="chk" style="margin-bottom:4px">
+                <input type="radio" name="accelmode" value="auto" checked>
+                <span>自动 —— 有 NVIDIA 显卡就用 GPU，失败自动退回 CPU</span>
+              </label>
+              <label class="chk" style="margin-bottom:4px">
+                <input type="radio" name="accelmode" value="gpu">
+                <span>优先 GPU —— 强制使用显卡（不降级，GPU 不可用会报错）</span>
+              </label>
+              <label class="chk">
+                <input type="radio" name="accelmode" value="cpu">
+                <span>优先 CPU —— 只用处理器（省电、避免显卡被占用时卡顿）</span>
+              </label>
+            </div>
+            <div class="field-tip" id="set-accel-hint" style="margin-top:6px;color:#8b9199"></div>
+          </div>
+
+          <div class="pane-divider"></div>
+
+          <div class="pane-title">磁盘占用</div>
+          <div class="field">
+            <div class="field-tip">所有数据都在程序目录里，没有往 C 盘乱写。</div>
+            <div id="disk-usage" class="disk-box">
+              <div id="disk-prog" class="disk-part">正在统计…</div>
+              <div id="disk-c" class="disk-part"></div>
+            </div>
+            <div class="row" style="margin-top:8px">
+              <button class="btn" id="btn-disk-refresh">🔄 重新统计</button>
+              <button class="btn" id="btn-disk-clean">🧹 清理 C 盘残留</button>
+            </div>
+            <pre id="disk-clean-log" class="disk-log" style="display:none"></pre>
+          </div>
+
+        </div>
+
       </div>
       <div class="modal-foot">
         <button class="btn" id="btn-cancel-settings">取消</button>

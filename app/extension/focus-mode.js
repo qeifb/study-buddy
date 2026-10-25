@@ -16,6 +16,22 @@
  * 用户随时可关：点角标上的「暂停守护」按钮（关掉后本页不再续播）。
  */
 ;(function () {
+  /* ★ 2026-10-25 修「出现多个专注模式卡片」的 bug
+   *
+   * 原因：window.__studyBuddyFocusMode 只能防「同一个扩展的同一上下文」重复注入。
+   *   如果页面里同时存在完整版扩展和仅专注模式扩展（或同版本装了两份），
+   *   它们各有独立的 JS 上下文，window 变量互不可见 → 各插一个按钮 → 多个卡片。
+   *
+   * 修法：DOM 是共享的，所以用一个 DOM 元素当全局锁：
+   *   如果页面里已经存在带 data-sb-focus-lock 的元素，说明别的实例已在工作，直接退出。
+   */
+  try {
+    if (document.querySelector('[data-sb-focus-lock]')) return
+  } catch { /* ignore */ }
+  const lockEl = document.createElement('meta')
+  lockEl.setAttribute('data-sb-focus-lock', '1')
+  try { (document.head || document.documentElement).appendChild(lockEl) } catch { /* ignore */ }
+
   if (window.__studyBuddyFocusMode) return
   window.__studyBuddyFocusMode = true
 
@@ -75,22 +91,43 @@
   function flashTip(text, color) {
     try {
       if (isOff()) return
-      if (!tipEl) {
-        tipEl = document.createElement('div')
-        tipEl.style.cssText = [
-          'position:fixed', 'left:50%', 'top:12px', 'transform:translateX(-50%)',
-          'z-index:2147483647', 'padding:6px 12px', 'border-radius:8px',
-          'font:12px/1.4 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif',
-          'box-shadow:0 4px 14px rgba(0,0,0,.28)', 'pointer-events:none',
-        ].join(';')
-        document.documentElement.appendChild(tipEl)
+
+      /* ★ 2026-10-25 修复「页面上出现两个提示」
+       *
+       * 原来 focus-mode 和 pilot-core **各建一套提示 DOM**，互不感知，
+       * 于是同一时刻能看到两个不同的提示条（用户截图确认）。
+       *
+       * 现在：
+       *   ① 优先复用页面上的统一提示条（id=__sb_tip，由 pilot-core 创建/更新）
+       *   ② 没有时才自己建，但同样用 __sb_tip 这个 id，保证全页唯一
+       *   ③ 同样顶部居中 + 常驻（不自动消失），与主提示行为一致
+       */
+      let el = document.getElementById('__sb_tip')
+
+      if (typeof window.__sbFlash === 'function') {
+        // pilot-core 已就绪：直接委托，颜色交给它按 kind 决定
+        window.__sbFlash(text, color ? 'ok' : 'info')
+        return
       }
-      tipEl.textContent = text
-      tipEl.style.background = color || 'rgba(63,207,127,.94)'
-      tipEl.style.color = color ? '#fff' : '#0b2417'
-      tipEl.style.display = 'block'
-      clearTimeout(tipTimer)
-      tipTimer = setTimeout(() => { if (tipEl) tipEl.style.display = 'none' }, 2200)
+
+      if (!el) {
+        el = document.createElement('div')
+        el.id = '__sb_tip'
+        el.style.cssText = [
+          'position:fixed', 'left:50%', 'top:12px', 'transform:translateX(-50%)',
+          'z-index:2147483647', 'padding:7px 12px', 'border-radius:9px',
+          'font:12.5px/1.5 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif',
+          'box-shadow:0 5px 18px rgba(0,0,0,.32)', 'pointer-events:none',
+          'max-width:min(72vw,560px)', 'opacity:.95',
+        ].join(';')
+        document.documentElement.appendChild(el)
+      }
+      el.textContent = text
+      el.style.background = color || 'rgba(63,207,127,.96)'
+      el.style.color = color ? '#fff' : '#0b2417'
+      el.style.display = 'block'
+      tipEl = el
+      // 不再 setTimeout 隐藏 —— 常驻，让用户知道守护一直在工作
     } catch { /* ignore */ }
   }
 
@@ -174,6 +211,9 @@
   /* ───────── 角标开关（可关掉守护） ───────── */
 
   function attachKillSwitch() {
+    /* ★ 2026-10-25：再加一道「全页唯一」保险——
+       原来只检查 badge 内是否有按钮，若另一份扩展把按钮插到了别处就会重复。 */
+    try { if (document.querySelectorAll('.__sb_focus_btn').length > 0) return } catch { /* ignore */ }
     const badge = document.getElementById('__studybuddy_badge')
     if (!badge || badge.querySelector('.__sb_focus_btn')) return
 

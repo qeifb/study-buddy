@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "学习通防暂停（专注模式）",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "鼠标一离开学习通播放框视频就暂停？这个扩展会在一秒内自动帮你续播。不联网、不收集数据、不需要任何权限。",
   "content_scripts": [
     {
@@ -9,7 +9,9 @@
         "*://*.chaoxing.com/*",
         "*://*.xuexitong.com/*"
       ],
-      "js": ["focus-mode.js"],
+      "js": [
+        "focus-mode.js"
+      ],
       "run_at": "document_idle",
       "all_frames": true
     }

@@ -95,7 +95,11 @@ def _build_model(model_path, device, compute_type):
     )
 
 
-def _run(model, media, language, beam_size, hotwords=None, initial_prompt=None, log_every=100):
+# log_every：每转写多少段报一次进度。
+# 2026-10-25 由 100 改为 20 —— 用户要求「应用端恢复以往设置，20 段展示一次进度」：
+#   间隔太小（每段）界面数字一直跳、看着吵；
+#   间隔太大（100+）会让用户以为卡住了。20 段约等于 1 分钟音频，节奏刚好。
+def _run(model, media, language, beam_size, hotwords=None, initial_prompt=None, log_every=20):
     kwargs = {
         "language": language or None,
         "beam_size": beam_size,
@@ -140,10 +144,51 @@ def main():
         return 1
 
     model_path = args.model_dir or args.model
-    attempts = [(args.device, args.compute_type)]
-    if args.device == "auto" or args.compute_type == "auto":
-        # GPU 相关的 DLL 缺失/架构不支持时退回 CPU
-        attempts.append(("cpu", "int8"))
+    # ══════════════════════════════════════════════════════════════
+    # 设备选择策略（2026-10-25 重写，用户要求「万无一失的 GPU 加速」）
+    #
+    # --device 支持三档：
+    #   auto  → 先试 GPU，任何环节失败都自动退 CPU（默认，照顾大众）
+    #   cuda  → 只用 GPU。用户明确要求 GPU 时，若 GPU 不可用则**报错而不是静默降级**
+    #           （避免「我明明选了 GPU，结果偷偷用 CPU 跑了 10 分钟」）
+    #   cpu   → 只用 CPU（照顾特殊用户：集显笔记本、GPU 被占用、远程桌面等）
+    #
+    # 注意：ctranslate2 只支持 NVIDIA CUDA，**AMD 显卡 / Intel 集显会自动走 CPU**
+    #       （get_cuda_device_count() 返回 0 时直接跳 CPU，不做无意义的 GPU 尝试）
+    # ══════════════════════════════════════════════════════════════
+    attempts = []
+    want = (args.device or "auto").strip().lower()
+
+    if want == "cpu":
+        attempts = [("cpu", "int8")]
+        log("已选择：仅 CPU（用户设置）")
+    elif want == "cuda":
+        # 用户明确要 GPU：不做静默降级。
+        # ★ 注意：compute_type='auto' 不能直接传给 ctranslate2（它只认
+        #   float16/int8_float16/int8/float32 等具体值），要展开成候选序列。
+        if args.compute_type == "auto":
+            attempts = [("cuda", "float16"), ("cuda", "int8_float16"), ("cuda", "int8")]
+        else:
+            attempts = [("cuda", args.compute_type)]
+        log("已选择：仅 GPU（用户设置，不会自动退回 CPU）")
+    else:
+        # auto：探测 GPU 是否真的存在，再决定尝试顺序
+        has_gpu = False
+        try:
+            import ctranslate2
+            has_gpu = ctranslate2.get_cuda_device_count() > 0
+        except Exception:
+            has_gpu = False
+        if has_gpu:
+            log("检测到 NVIDIA GPU，优先尝试 GPU 加速（失败会自动退回 CPU）")
+            if args.compute_type == "auto":
+                # 先试 float16（最快且省显存），不行再试 int8_float16，最后 CPU
+                attempts = [("cuda", "float16"), ("cuda", "int8_float16"), ("cpu", "int8")]
+            else:
+                attempts = [("cuda", args.compute_type), ("cpu", "int8")]
+        else:
+            log("未检测到可用 NVIDIA GPU（AMD/Intel 显卡不支持 CUDA 加速），使用 CPU")
+            attempts = [("cpu", "int8")]
 
     model = None
     used = None
@@ -169,9 +214,12 @@ def main():
             out, info = _run(model, args.media, args.language, args.beam_size, args.hotwords, args.initial_prompt)
         except Exception as exc:  # noqa: BLE001
             msg = str(exc)
-            gpu_like = any(k in msg.lower() for k in ("cublas", "cudnn", "cuda", "no kernel image", "gpu"))
-            if used[0] != "cpu" and gpu_like:
-                log(f"GPU 转写失败（{msg}），退回 CPU int8 重试")
+            gpu_like = any(k in msg.lower() for k in ("cublas", "cudnn", "cuda", "no kernel image", "gpu", "out of memory"))
+            # ★ 2026-10-25：用户设置 cpu 或显式 cuda 时不静默降级；
+            #   auto 模式下任何 GPU 类失败都退回 CPU，保证「万无一失」。
+            can_fallback = (want == "auto") and (used[0] != "cpu") and gpu_like
+            if can_fallback:
+                log(f"GPU 转写失败（{msg}），自动退回 CPU int8 重试（不影响结果，只是慢一些）")
                 model = _build_model(model_path, "cpu", "int8")
                 used = ("cpu", "int8")
                 out, info = _run(model, args.media, args.language, args.beam_size, args.hotwords, args.initial_prompt)
@@ -193,7 +241,7 @@ def main():
     }
     with open(args.out, "w", encoding="utf-8") as fp:
         json.dump(result, fp, ensure_ascii=False)
-    log(f"完成：{len(out)} 段，用时 {result['elapsed']}s（device={used[0]}）")
+    log(f"完成：{len(out)} 段，用时 {result['elapsed']}s（实际使用设备={used[0]}/{used[1]}）")
     return 0
 
 

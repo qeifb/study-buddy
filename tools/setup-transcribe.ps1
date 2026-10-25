@@ -174,11 +174,21 @@ if (Test-Path $PyExe) {
 Step "安装语音识别库 faster-whisper（第一次约 200MB，请耐心等）"
 Warn "使用 PyPI 镜像加速：$PyPiIndex"
 & $PyExe -m pip install --upgrade pip --disable-pip-version-check -q -i $PyPiIndex
-& $PyExe -m pip install --upgrade faster-whisper huggingface_hub --disable-pip-version-check -i $PyPiIndex
+
+# ★ 2026-10-25：不装 nvidia-* CUDA 包，纯 CPU 转写用不到，却占 2GB
+#   （cublas 736MB + cudnn 1096MB + nvrtc 178MB）。
+#   faster-whisper / ctranslate2 的依赖树里都没有它们，是 pip 自动带的可选包。
+& $PyExe -m pip install faster-whisper huggingface_hub --disable-pip-version-check -i $PyPiIndex
 if ($LASTEXITCODE -ne 0) { Die "pip 安装失败，请检查网络（可尝试换国内镜像）。" }
+
+# 若之前装过 nvidia-*（旧版残留），主动卸掉，避免白占 2GB
+Step "清理用不到的 CUDA 包（纯 CPU 转写不需要）"
+& $PyExe -m pip uninstall -y -q nvidia-cublas-cu12 nvidia-cudnn-cu12 nvidia-cuda-nvrtc-cu12 2>$null
+Warn "CUDA 包清理完成（若本来就没有，属正常）"
 $fw = & $PyExe -c "import faster_whisper;print(faster_whisper.__version__)"
 if (-not $fw) { Die "faster-whisper 装上了但导入失败。" }
 Ok "faster-whisper $fw 已就绪"
+
 
 # ---------- 3. 下载识别模型 ----------
 if (Test-Path (Join-Path $ModelDir 'model.bin')) {

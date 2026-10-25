@@ -55,6 +55,17 @@
     submitWaitMs: 1600,
     /* 等待 iframe 加载的超时 */
     frameTimeoutMs: 25000,
+    /* 2026-10-25 新增：视频播放期间就预抓课程日志（边播边下载+转写）
+     *
+     * 动机：用户实测「每次都是等视频播放完才开始下载转码」。
+     *   一节 14 分钟的视频，播完后还要等 ~90 秒（下载 45MB + 转写 400+ 段）。
+     *   而下载与播放互不干扰 —— 学习通的视频是整段 mp4，可以边播边下。
+     *   抓过一次后应用端会复用（findByChapterId），播完立刻能答题。
+     *
+     * 注意：这只是「提前准备素材」，不改变「必须先看完再答」的纪律。 */
+    prefetchLog: true,
+    /* 播放到多少比例才开始预抓（太早视频可能还没加载出真实 src） */
+    prefetchMinRatio: 0.02,
     /* 抓日志最长等待
      * 2026-10-24 实测数据：模型加载 ~30s + 下载 45MB ~2s + 转写 425 段 ~87s ≈ 2 分钟，
      * 长视频（30 分钟课 600+ 段）可能要 3-4 分钟。原 200 秒偏紧，放宽到 6 分钟。 */
@@ -89,39 +100,104 @@
 
   /* ───────────────────── 提示条 ───────────────────── */
 
-  let tipEl = null, tipTimer = null
+  /* ★ 2026-10-25 重写：提示改为常驻
+   *
+   * 用户原话：「我希望浏览器扩展的提示能一直常驻以证明我们的插件一直在工作，
+   *            现在的做法是展示一段就消失了」
+   *
+   * 设计：
+   *   · 提示不自动消失，一直显示「最近在做什么」
+   *   · 附带「N 秒前」计时（时间在走 = 插件活着，这是最直观的存活证明）
+   *   · 提供 × 手动关闭；关闭后本次页面不再弹（但 LOG 仍记录）
+   *   · 同类提示原地更新，不叠加、不刷屏
+   *   · 位置改右下角 + 半透明，不遮挡学习通顶部控件
+   */
+  let tipEl = null, tipBox = null, tipBody = null, tipAge = null, tipKind = 'info'
+  let tipSetAt = 0, tipClosed = false, tipTick = null
+
+  const PALETTE = {
+    ok: ['rgba(63,207,127,.96)', '#0b2417'],
+    info: ['rgba(88,166,255,.96)', '#06131f'],
+    warn: ['rgba(255,200,87,.96)', '#2b2b2b'],
+    err: ['rgba(255,107,107,.96)', '#2b0000'],
+  }
+
+  function ensureTip() {
+    if (tipEl && tipEl.isConnected) return
+    /* 统一 id：focus-mode.js 通过它复用同一个提示条，避免两个提示同时出现 */
+    const existTip = document.getElementById('__sb_tip')
+    if (existTip) { tipEl = existTip; }
+    if (!tipEl) tipEl = document.createElement('div')
+    tipEl.id = '__sb_tip'
+    tipEl.style.cssText = [
+      'position:fixed', 'left:50%', 'top:12px', 'transform:translateX(-50%)',
+      'z-index:2147483647', 'padding:7px 10px 7px 12px', 'border-radius:9px',
+      'font:12.5px/1.5 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif',
+      'box-shadow:0 5px 18px rgba(0,0,0,.32)',
+      'max-width:min(52vw,460px)', 'display:flex', 'align-items:flex-start', 'gap:8px',
+      'opacity:.94', 'pointer-events:none',
+    ].join(';')
+
+    tipBody = document.createElement('span')
+    tipBody.style.cssText = 'flex:1;word-break:break-word'
+    tipEl.appendChild(tipBody)
+
+    tipAge = document.createElement('span')
+    tipAge.style.cssText = 'flex:0 0 auto;opacity:.72;font-size:11px;padding-top:1px'
+    tipEl.appendChild(tipAge)
+
+    const x = document.createElement('span')
+    x.textContent = '×'
+    x.title = '关闭后本页不再提示（后台仍继续工作）'
+    x.style.cssText = 'flex:0 0 auto;cursor:pointer;opacity:.6;font-size:14px;line-height:1;padding:0 2px;pointer-events:auto'
+    x.onclick = (e) => {
+      e.stopPropagation()
+      tipClosed = true
+      try { tipEl.remove() } catch { /* ignore */ }
+      tipEl = null
+    }
+    tipEl.appendChild(x)
+
+    if (!tipEl.isConnected) document.documentElement.appendChild(tipEl)
+
+    // 每分钟刷新「N 分钟前」——时间在变，用户就知道它一直在工作
+    if (tipTick) clearInterval(tipTick)
+    tipTick = setInterval(() => {
+      if (!tipAge || !tipAge.isConnected) return
+      /* ★ 2026-10-25 用户要求「时间按分钟计时」 */
+      const mins = Math.floor((Date.now() - tipSetAt) / 60000)
+      tipAge.textContent = mins < 1 ? '刚刚' : mins + ' 分钟前'
+    }, 30000)
+  }
+
   function flash(text, kind) {
+    LOG(text)
+    if (tipClosed) return
     try {
-      if (!tipEl) {
-        tipEl = document.createElement('div')
-        tipEl.style.cssText = [
-          'position:fixed', 'left:50%', 'top:12px', 'transform:translateX(-50%)',
-          'z-index:2147483647', 'padding:8px 14px', 'border-radius:9px',
-          'font:12.5px/1.5 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif',
-          'box-shadow:0 5px 18px rgba(0,0,0,.32)', 'pointer-events:none', 'max-width:72vw',
-          'transition:opacity .2s',
-        ].join(';')
-        document.documentElement.appendChild(tipEl)
+      ensureTip()
+      if (!tipEl) return
+      const [bg, fg] = PALETTE[kind] || PALETTE.info
+      // 同类提示不重复重绘（避免闪）
+      if (tipBody.textContent !== text) tipBody.textContent = text
+      if (tipKind !== kind) {
+        tipKind = kind
+        tipEl.style.background = bg
+        tipEl.style.color = fg
+      } else if (!tipEl.style.background) {
+        tipEl.style.background = bg
+        tipEl.style.color = fg
       }
-      const palette = {
-        ok: ['rgba(63,207,127,.95)', '#0b2417'],
-        info: ['rgba(88,166,255,.95)', '#06131f'],
-        warn: ['rgba(255,200,87,.96)', '#2b2b2b'],
-        err: ['rgba(255,107,107,.95)', '#2b0000'],
-      }
-      const [bg, fg] = palette[kind] || palette.info
-      tipEl.textContent = text
-      tipEl.style.background = bg
-      tipEl.style.color = fg
-      tipEl.style.display = 'block'
-      tipEl.style.opacity = '1'
-      clearTimeout(tipTimer)
-      tipTimer = setTimeout(() => {
-        if (tipEl) { tipEl.style.opacity = '0'; setTimeout(() => { if (tipEl) tipEl.style.display = 'none' }, 220) }
-      }, 3200)
-      LOG(text)
+      tipEl.style.display = 'flex'
+      tipSetAt = Date.now()
+      if (tipAge) tipAge.textContent = '刚刚'
     } catch { /* ignore */ }
   }
+
+  /** 主动恢复提示（例如页面重建后） */
+  function flashRestore() { tipClosed = false; ensureTip() }
+
+  /* 暴露给 focus-mode.js 等其他模块，让全页只有一个提示条（2026-10-25） */
+  try { window.__sbFlash = flash } catch { /* ignore */ }
 
   /* ───────────────────── 诊断 ───────────────────── */
 
@@ -182,6 +258,59 @@
   /* ───────────────────── 任务点判据 ───────────────────── */
 
   /** 章节列表里当前激活项的章节信息 */
+  /**
+   * 从 active 节点尽力挖出 chapterId（2026-10-25 重写）
+   *
+   * 教训：原来只靠 onclick 的 getTeacherAjax('course','clazz','chapter') 正则，
+   * 一旦解析失败 chapterId 就是空字符串，而 prefetchLogIfNeeded 的第一道检查
+   * 正是 `if (!ch.chapterId) return` —— 于是「边播边抓」永久静默失效，
+   * 日志里一个字都看不到，极难排查（用户已两次报「又不会边播边下载了」）。
+   *
+   * 现在做四层兜底，任一层成功即可。
+   */
+  function resolveChapterId(active, nameEl, onclick) {
+    // ① 原逻辑：onclick 里的 getTeacherAjax(courseId, clazzId, chapterId)
+    const m = /getTeacherAjax\(\s*'([^']*)'\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*\)/.exec(onclick || '')
+    if (m && m[3]) return { chapterId: m[3], courseId: m[1], clazzId: m[2], from: 'onclick' }
+
+    // ② 顶层页面 URL 的 chapterId 参数（最可靠：用户正在看这一章）
+    let urlCid = ''
+    try {
+      const u = new URL((window.top || window).location.href)
+      urlCid = u.searchParams.get('chapterId') || ''
+    } catch { /* ignore */ }
+    if (!urlCid) {
+      try { urlCid = (location.href.match(/[?&]chapterId=(\d+)/) || [])[1] || '' } catch { /* ignore */ }
+    }
+    if (urlCid) return { chapterId: urlCid, courseId: m ? m[1] : '', clazzId: m ? m[2] : '', from: 'url' }
+
+    // ③ active 自身或祖先的 id / data-* 里的纯数字
+    try {
+      let cur = active
+      for (let i = 0; i < 4 && cur; i++) {
+        for (const attr of ['chapterid', 'data-chapterid', 'data-chapter-id', 'id']) {
+          const v = cur.getAttribute && cur.getAttribute(attr)
+          if (v) {
+            const mm = /(\d{5,})/.exec(String(v))
+            if (mm) return { chapterId: mm[1], courseId: m ? m[1] : '', clazzId: m ? m[2] : '', from: 'attr:' + attr }
+          }
+        }
+        cur = cur.parentElement
+      }
+    } catch { /* ignore */ }
+
+    // ④ active 内部的隐藏 input
+    try {
+      const inp = active.querySelector('input[name="chapterId"], input#chapterId, input[name="knowledgeId"]')
+      if (inp && inp.value) {
+        const mm = /(\d{5,})/.exec(String(inp.value))
+        if (mm) return { chapterId: mm[1], courseId: m ? m[1] : '', clazzId: m ? m[2] : '', from: 'input' }
+      }
+    } catch { /* ignore */ }
+
+    return { chapterId: '', courseId: m ? m[1] : '', clazzId: m ? m[2] : '', from: 'none' }
+  }
+
   function currentChapter() {
     try {
       const items = Array.from(document.querySelectorAll('.posCatalog_select'))
@@ -189,16 +318,17 @@
       if (!active) return null
       const nameEl = active.querySelector('.posCatalog_name')
       const onclick = nameEl?.getAttribute('onclick') || ''
-      const m = /getTeacherAjax\(\s*'([^']*)'\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*\)/.exec(onclick)
+      const cid = resolveChapterId(active, nameEl, onclick)
       const unf = active.querySelector('input.jobUnfinishCount')
       const name = (nameEl?.getAttribute('title') || txt(nameEl, 60)).trim()
       return {
         node: active,
         nameEl,
         name,
-        chapterId: m ? m[3] : '',
-        courseId: m ? m[1] : '',
-        clazzId: m ? m[2] : '',
+        chapterId: cid.chapterId,
+        courseId: cid.courseId,
+        clazzId: cid.clazzId,
+        chapterIdFrom: cid.from,
         unfinish: unf ? Number(unf.value) : 0,
         completed: Boolean(active.querySelector('.icon_Completed')),
         hasPointsYi: Boolean(active.querySelector('.catalog_points_yi')),

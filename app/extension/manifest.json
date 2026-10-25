@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "学习通学伴",
-  "version": "0.6.6",
+  "version": "0.7.0",
   "description": "把正在看的学习通网课内容交给「学习通学伴」应用，由 AI 整理成课程日志。不上传任何内容到云端。",
   "permissions": [
     "scripting",
@@ -47,8 +47,18 @@
       "all_frames": false
     }
   ],
+  "icons": {
+    "16": "icons/icon-16.png",
+    "32": "icons/icon-32.png",
+    "48": "icons/icon-48.png",
+    "128": "icons/icon-128.png"
+  },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "学习通学伴"
+    "default_title": "学习通学伴",
+    "default_icon": {
+      "16": "icons/icon-16.png",
+      "32": "icons/icon-32.png"
+    }
   }
 }

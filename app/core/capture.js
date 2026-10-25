@@ -205,6 +205,22 @@ async function transcribe(mediaPath, { outPath, onLog }) {
   return new Promise((resolve, reject) => {
     const args = [scriptPath, mediaPath, '--out', outPath, '--language', 'zh']
     if (fs.existsSync(modelDir)) { args.push('--model-dir', modelDir) }
+
+    /* ★ 2026-10-25：按设置决定硬件加速方式
+     *   hardwareAccel=false 或 accelMode='cpu' → --device cpu（强制 CPU）
+     *   accelMode='gpu'                        → --device cuda（强制 GPU，失败报错）
+     *   其它                                    → --device auto（默认：有 NVIDIA 就 GPU，失败自动退 CPU） */
+    try {
+      const { readSettings } = require('./ai')
+      const st = readSettings() || {}
+      const on = st.hardwareAccel !== false
+      const mode = String(st.accelMode || 'auto').toLowerCase()
+      const dev = (!on || mode === 'cpu') ? 'cpu' : (mode === 'gpu' ? 'cuda' : 'auto')
+      args.push('--device', dev)
+    } catch {
+      /* 读设置失败就用 auto，保证功能不因此不可用 */
+      args.push('--device', 'auto')
+    }
     const env = { ...process.env, HF_HUB_OFFLINE: '1', PYTHONIOENCODING: 'utf-8' }
     const child = spawn(pyenv, args, { env, windowsHide: true })
     let stderr = ''

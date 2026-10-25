@@ -739,7 +739,11 @@ async function openSettings() {
   const s = state.settings || {}
   $('#set-base').value = s.baseUrl || 'https://dashscope.aliyuncs.com/compatible-mode/v1'
   $('#set-model').value = s.model || 'qwen-plus'
-  $('#set-vision').value = s.visionModel || 'qwen3-vl-plus'
+  $('#set-vision-model').value = s.visionModel || 'qwen3-vl-plus'
+  $('#set-vision-base').value = s.visionBaseUrl || ''
+  $('#set-vision-key').value = s.visionApiKey || ''
+    /* 硬件加速设置（2026-10-25） */
+    try { syncAccelUI(s) } catch { /* ignore */ }
   $('#set-key').value = s.apiKey || ''
   const out = $('#test-result')
   if (out) {
@@ -815,7 +819,13 @@ async function saveSettings() {
   state.settings = await api.settings.save({
     baseUrl: $('#set-base').value.trim(),
     model: $('#set-model').value.trim(),
-    visionModel: $('#set-vision').value.trim() || 'qwen3-vl-plus',
+    visionModel: $('#set-vision-model').value.trim() || 'qwen3-vl-plus',
+  visionBaseUrl: $('#set-vision-base').value.trim(),
+  visionApiKey: $('#set-vision-key').value.trim(),
+
+    hardwareAccel: (() => { const el = document.getElementById('set-hwaccel'); return !el || el.checked !== false })(),
+
+    accelMode: (() => { const r = document.querySelector('input[name="accelmode"]:checked'); return r ? r.value : 'auto' })() || 'qwen3-vl-plus',
     apiKey: $('#set-key').value.trim(),
   })
   $('#modal-settings').hidden = true
@@ -1018,6 +1028,11 @@ function bind() {
  * 现在把 main.js 广播的 autocapture:event 渲染成界面上的实时进度。
  */
 function mountAutoCaptureProgress() {
+  /* ★ 2026-10-25 停用：用户要求抓取进度只在对话区以智能体消息呈现，
+     不要右侧独立浮动卡片。改为由 mountCaptureInThread 负责。
+     这里保留 early return，防止任何残留引用再把面板画出来。 */
+  return
+  // eslint-disable-next-line no-unreachable
   // 一个固定的浮层区域，避免污染会话记录
   let panel = null
   let rows = null
@@ -1105,9 +1120,210 @@ function mountAutoCaptureProgress() {
   }
 }
 
+/**
+ * 在对话区渲染「抓取课程日志」的过程与结果（2026-10-25 新增）
+ *
+ * 动机（用户原话）：
+ *   「应用端的展示抓取过程不用单开一个卡片在输入框旁边，
+ *    直接按智能体的回答展示出来，并做出图1的卡片风格提示在对话区，
+ *    不然用户会认为我们什么都没做会以为我们卡住了」
+ *
+ * 做法：
+ *   · 抓取开始 → 在对话区插入一条 assistant 气泡
+ *   · 过程中 → 气泡内逐行追加/更新进度（像智能体在实时汇报）
+ *   · 完成 → 气泡内容替换成结构化卡片（与扩展侧的抓取完成卡同款风格）
+ */
+function mountCaptureInThread() {
+  let card = null        // 当前正在更新的气泡容器
+  let body = null        // 气泡内的内容区
+  const seen = new Map() // stage → 行元素
+
+  function threadEl() {
+    return document.getElementById('thread') || document.querySelector('.thread') || document.getElementById('messages')
+  }
+
+  function ensureCard() {
+    /* ★ 2026-10-25 修：原用 document.body.contains(card) 判断卡片是否还有效，
+     *   但该判断在某些情况下为 false（如 document 未就绪、或卡片刚被移除），
+     *   导致每次收到事件都重建卡片 → 进度行全部丢失、每行重复出现。
+     *   改用更直接的判断：卡片存在 且 仍有 parentNode。 */
+    if (card && card.parentNode) return card
+    const th = threadEl()
+    if (!th) return null
+
+    card = el('div', 'msg assistant')
+    const bubble = el('div', 'bubble capture-bubble')
+    bubble.style.cssText = 'max-width:min(560px,92%);padding:10px 12px'
+
+    // 标题行
+    const head = el('div')
+    head.style.cssText = 'display:flex;align-items:center;gap:7px;margin-bottom:6px'
+    const ico = el('span', null, '📚')
+    ico.style.cssText = 'font-size:14px'
+    const title = el('span', null, '正在抓取这一节的课程日志')
+    title.style.cssText = 'font-weight:600;color:#8cc4ff;font-size:13px'
+    const close = el('span', null, '×')
+    close.style.cssText = 'margin-left:auto;cursor:pointer;color:#9aa0a8;font-size:15px;padding:0 4px'
+    close.onclick = () => { try { card.remove() } catch { /* ignore */ } card = null }
+    head.appendChild(ico); head.appendChild(title); head.appendChild(close)
+
+    body = el('div')
+    body.style.cssText = 'font-size:12.5px;line-height:1.65;color:#b8bec6'
+
+    bubble.appendChild(head)
+    bubble.appendChild(body)
+    card.appendChild(bubble)
+    th.appendChild(card)
+    try { th.scrollTop = th.scrollHeight } catch { /* ignore */ }
+    return card
+  }
+
+  function line(text, kind, key) {
+    if (!ensureCard()) return
+    if (key && seen.has(key)) {
+      const row = seen.get(key)
+      const lab = row.lastChild
+      if (lab) lab.textContent = text
+      try {
+        const th = threadEl()
+        if (th) th.scrollTop = th.scrollHeight
+      } catch { /* ignore */ }
+      return
+    }
+    const row = el('div')
+    row.style.cssText = 'display:flex;gap:6px;align-items:flex-start;margin:2px 0'
+    const dot = el('span', null, '•')
+    dot.style.cssText = 'flex:0 0 auto;color:' + (kind === 'done' ? '#63cf7f' : kind === 'err' ? '#ff6b6b' : '#8cc4ff')
+    const lab = el('span', null, text)
+    lab.style.cssText = 'flex:1;word-break:break-word'
+    row.appendChild(dot); row.appendChild(lab)
+    body.appendChild(row)
+    if (key) seen.set(key, row)
+    try {
+      const th = threadEl()
+      if (th) th.scrollTop = th.scrollHeight
+    } catch { /* ignore */ }
+  }
+
+  /** 完成时渲染结构化卡片（与用户给的图1 同款信息密度） */
+  function showResult(info, ok) {
+    if (!ensureCard()) return
+    const d = info || {}
+    body.textContent = ''
+    seen.clear()
+
+    const box = el('div')
+    box.style.cssText = [
+      'border:1px solid ' + (ok ? 'rgba(99,207,127,.35)' : 'rgba(255,107,107,.4)'),
+      'border-radius:8px',
+      'padding:9px 11px',
+      'background:rgba(255,255,255,.03)',
+    ].join(';')
+
+    const rows = [
+      ['课程', d.course || '—'],
+      ['章节', d.title || '—'],
+      ['时长', d.duration || '—'],
+      ['转写', d.segments != null ? `${d.segments} 段 / ${d.chars || 0} 字` : '—'],
+      ['状态', ok ? (d.reused ? '♻️ 复用已有日志' : '✅ 本次新抓取') : '❌ 抓取失败'],
+      ['保存位置', d.file || '—'],
+    ]
+    for (const [k, v] of rows) {
+      const r = el('div')
+      r.style.cssText = 'display:flex;gap:10px;margin:2px 0;align-items:flex-start'
+      const kk = el('span', null, k)
+      kk.style.cssText = 'flex:0 0 62px;color:#8b9199;font-size:12px'
+      const vv = el('span', null, String(v))
+      vv.style.cssText = 'flex:1;word-break:break-all;font-size:12px;color:' +
+        (k === '状态' ? (ok ? '#63cf7f' : '#ff6b6b') : '#dde1e6')
+      r.appendChild(kk); r.appendChild(vv)
+      box.appendChild(r)
+    }
+
+    // 打开日志文件按钮
+    if (ok && d.file) {
+      const btn = el('button', 'btn', '📂 打开日志文件')
+      btn.style.cssText = 'margin-top:8px;font-size:12px;padding:4px 10px'
+      btn.onclick = async () => {
+        try {
+          if (window.studyBuddy && window.studyBuddy.logs && window.studyBuddy.logs.open) {
+            await window.studyBuddy.logs.open(d.file)
+          } else if (window.studyBuddy && window.studyBuddy.openPath) {
+            await window.studyBuddy.openPath(d.file)
+          } else {
+            alert('保存位置：\n' + d.file)
+          }
+        } catch (e) { alert('打开失败：' + (e?.message || e)) }
+      }
+      box.appendChild(btn)
+    }
+
+    body.appendChild(box)
+    // 更新标题
+    const head = card && card.querySelector('div')
+    if (head) {
+      const t = head.children[1]
+      const c = head.children[2]
+      if (t) t.textContent = ok ? '课程日志已就绪' : '抓取失败'
+      if (c) c.remove()
+    }
+    try {
+      const th = threadEl()
+      if (th) th.scrollTop = th.scrollHeight
+    } catch { /* ignore */ }
+  }
+
+  /** 订阅自动抓取事件 */
+  function bind() {
+    try {
+      if (!window.studyBuddy || !window.studyBuddy.autocapture || !window.studyBuddy.autocapture.onEvent) return
+      window.studyBuddy.autocapture.onEvent((ev) => {
+        const t = ev && ev.type
+        if (t === 'start') {
+          card = null; seen.clear()
+          ensureCard()
+          line('扩展已触发自动抓取，正在准备…', 'info', 'start')
+        } else if (t === 'stage') {
+          if (!card) ensureCard()
+          const stage = String(ev.stage || '')
+          const text = String(ev.text || '')
+          if (!text) return
+          // 转写进度用固定 key，原地更新
+          if (stage === 'transcribe') line(text, 'info', 'transcribe')
+          else line(text, 'info', stage || null)
+        } else if (t === 'done') {
+          /* ★ 2026-10-25：原来 reused 写死 false，导致「复用已有日志」永远显示成「本次新抓取」。
+             改为透传事件里的 reused（main.js 已补该字段）。 */
+          showResult({
+            course: ev.course || '',
+            title: ev.title || '',
+            duration: ev.duration || '',
+            segments: ev.segments,
+            chars: ev.chars,
+            file: ev.file || ev.fullPath || '',
+            reused: ev.reused === true,
+          }, true)
+        } else if (t === 'failed') {
+          showResult({ title: ev.title || '', file: '', }, false)
+          if (ev.error) line(String(ev.error), 'err', null)
+        }
+      })
+    } catch { /* ignore */ }
+  }
+
+  bind()
+}
+
+
 async function boot() {
   bind()
-  mountAutoCaptureProgress()
+  /* ★ 2026-10-25：抓取进度改为在对话区以「智能体消息」呈现
+   *   （用户明确要求：不要右侧独立浮动卡片）。
+   *   旧函数 mountAutoCaptureProgress 已停用（保留代码但不再调用，
+   *   避免误删引发其它引用问题，且它的 DOM 面板不会再出现）。 */
+  try { mountCaptureInThread() } catch { /* ignore */ }
+  try { initSettingsTabs() } catch { /* ignore */ }
+  try { mountDiskUsage() } catch { /* ignore */ }
   try { setSideCollapsed(localStorage.getItem(SIDE_KEY) === '1', false) } catch { setSideCollapsed(false, false) }
   try { state.settings = await api.settings.load() } catch { state.settings = null }
   await refreshChats()
@@ -1120,4 +1336,147 @@ async function boot() {
   autoGrow()
 }
 
+/** 磁盘占用统计（2026-10-25 新增） */
+async function mountDiskUsage() {
+  const progBox = document.getElementById('disk-prog')
+  const cBox = document.getElementById('disk-c')
+  const logBox = document.getElementById('disk-clean-log')
+  if (!progBox) return
+
+  async function refresh() {
+    progBox.textContent = '正在统计…'
+    if (cBox) cBox.textContent = ''
+    try {
+      const d = await window.studyBuddy.disk.usage()
+      // 程序目录
+      const lines = d.parts.map((p) => `${p.name} <b>${p.text}</b>`).join('　·　')
+      progBox.innerHTML = `程序目录 <b>${d.rootTotal.text}</b>　　${lines}`
+
+      // C 盘
+      if (cBox) {
+        if (!d.cdrive.length) {
+          cBox.innerHTML = '✅ <b>C 盘没有本应用的残留</b>'
+        } else {
+          const cl = d.cdrive.map((p) => `${p.name} <b>${p.text}</b>`).join('　·　')
+          cBox.innerHTML = `⚠️ C 盘残留 <b>${d.cdriveTotal.text}</b>　　${cl}`
+        }
+      }
+    } catch (e) {
+      progBox.textContent = '统计失败：' + (e && e.message ? e.message : e)
+    }
+  }
+
+  const btnR = document.getElementById('btn-disk-refresh')
+  if (btnR) btnR.addEventListener('click', () => refresh())
+
+  const btnC = document.getElementById('btn-disk-clean')
+  if (btnC) {
+    btnC.addEventListener('click', async () => {
+      if (!confirm('清理 C 盘残留？\n\n只会删：旧版数据目录里的缓存、HuggingFace 缓存、临时文件。\n绝不会动课程日志、聊天记录和 API Key。')) return
+      btnC.disabled = true
+      btnC.textContent = '清理中…'
+      try {
+        const r = await window.studyBuddy.disk.cleanCdrive()
+        if (logBox) {
+          logBox.style.display = 'block'
+          logBox.textContent = r.ok
+            ? '✅ 完成' + (r.freed ? '，释放 ' + r.freed : '') + '\n\n' + (r.output || '')
+            : '❌ 失败：' + (r.error || '')
+        }
+        await refresh()
+      } catch (e) {
+        if (logBox) {
+          logBox.style.display = 'block'
+          logBox.textContent = '❌ 失败：' + (e && e.message ? e.message : e)
+        }
+      } finally {
+        btnC.disabled = false
+        btnC.textContent = '🧹 清理 C 盘残留'
+      }
+    })
+  }
+
+  await refresh()
+}
+
+
 boot()
+
+
+/** 硬件加速 UI 同步（2026-10-25 新增） */
+function syncAccelUI(s) {
+  const cb = document.getElementById('set-hwaccel')
+  const wrap = document.getElementById('set-accel-wrap')
+  const hint = document.getElementById('set-accel-hint')
+  if (!cb) return
+  const on = !(s && s.hardwareAccel === false)
+  cb.checked = on
+  const mode = (s && s.accelMode) || 'auto'
+  const radios = document.querySelectorAll('input[name="accelmode"]')
+  radios.forEach((r) => { r.checked = (r.value === mode) })
+  if (wrap) wrap.style.display = on ? '' : 'none'
+  if (hint) {
+    hint.textContent = on
+      ? (mode === 'cpu' ? '将只使用 CPU，速度较慢但更稳定。' : '')
+      : '已关闭硬件加速，将只使用 CPU。'
+  }
+  if (!bindHardwareAccel.done) {
+    bindHardwareAccel.done = true
+    cb.addEventListener('change', () => {
+      if (wrap) wrap.style.display = cb.checked ? '' : 'none'
+      if (hint) hint.textContent = cb.checked ? '' : '已关闭硬件加速，将只使用 CPU。'
+    })
+  }
+}
+
+
+/* ══════ 设置页分页 + 识别测试（2026-10-25 新增）══════ */
+
+function initSettingsTabs() {
+  const tabs = document.querySelectorAll('#settings-tabs .tab')
+  const panes = { api: document.getElementById('pane-api'), other: document.getElementById('pane-other') }
+  tabs.forEach((t) => {
+    t.addEventListener('click', () => {
+      const key = t.dataset.tab
+      tabs.forEach((x) => x.classList.toggle('active', x === t))
+      Object.entries(panes).forEach(([k, el]) => { if (el) el.classList.toggle('active', k === key) })
+      // 切到「其他设置」时刷新磁盘占用（可能刚装完东西）
+      if (key === 'other') { try { refreshDiskUsageNow() } catch { /* ignore */ } }
+    })
+  })
+}
+
+/** 识图模型测试 */
+async function testVisionModel() {
+  const btn = document.getElementById('btn-test-vision')
+  const out = document.getElementById('vision-test-result')
+  if (!btn || !out) return
+  btn.disabled = true
+  const old = btn.textContent
+  btn.textContent = '测试中…'
+  out.textContent = '正在发送一张测试图片…'
+  out.style.color = '#8b9199'
+  try {
+    const payload = {
+      visionBaseUrl: (document.getElementById('set-vision-base') || {}).value || '',
+      visionApiKey: (document.getElementById('set-vision-key') || {}).value || '',
+      visionModel: (document.getElementById('set-vision-model') || {}).value || '',
+    }
+    const r = await window.studyBuddy.settings.visionTest(payload)
+    if (r && r.ok) {
+      out.style.color = '#63cf7f'
+      out.textContent = '✅ 可用（' + r.ms + 'ms）　模型 ' + r.model + ' 回复：' + (r.reply || '(空)')
+    } else {
+      out.style.color = '#ff6b6b'
+      out.textContent = '❌ ' + ((r && r.error) || '未知错误')
+    }
+  } catch (e) {
+    out.style.color = '#ff6b6b'
+    out.textContent = '❌ ' + (e && e.message ? e.message : e)
+  } finally {
+    btn.disabled = false
+    btn.textContent = old
+  }
+}
+
+try { $('#btn-test-vision').addEventListener('click', testVisionModel) } catch { /* ignore */ }
