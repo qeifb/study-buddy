@@ -205,6 +205,49 @@
               </label>
             </div>
             <div class="field-tip" id="set-accel-hint" style="margin-top:6px;color:#8b9199"></div>
+        </div>
+
+        <div class="pane-divider"></div>
+
+        <div class="pane-title">转码速度</div>
+        <div class="field">
+          <div class="field-tip">
+            控制转码时占用多少 CPU。按「当前空闲部分」计算：
+            若你已用 20%，选 80% 则总占用约 84%。档位越高转得越快，但电脑越卡。
+          </div>
+          <label class="chk" style="margin-bottom:6px">
+            <input type="radio" name="transspeed" value="performance">
+            <span><b>性能优先</b> —— 占用空闲 CPU 的 80%，转码最快</span>
+          </label>
+          <label class="chk" style="margin-bottom:6px">
+            <input type="radio" name="transspeed" value="balanced" checked>
+            <span><b>平衡模式</b> —— 占用 60%，速度与流畅兼顾（推荐）</span>
+          </label>
+          <label class="chk">
+            <input type="radio" name="transspeed" value="quiet">
+            <span><b>静音模式</b> —— 占用 40%，转码慢但电脑几乎不卡</span>
+          </label>
+          <div class="field-tip" id="set-speed-hint" style="margin-top:6px;color:#8b9199"></div>
+        </div>
+
+        <div class="pane-divider"></div>
+
+        <div class="pane-title">CPU + GPU 同时转码</div>
+        <div class="field">
+          <div class="field-tip" id="set-parallel-tip">
+            把音频切两半，一半给 CPU、一半给显卡，同时跑。
+            <b>仅 NVIDIA 显卡可用</b>——A 卡 / Intel 集显不支持（底层库无对应后端）。
+          </div>
+          <label class="chk" id="set-parallel-wrap">
+            <input type="checkbox" id="set-parallel">
+            <span>启用 CPU+GPU 一起转码（需先安装 GPU 组件）</span>
+          </label>
+          <div class="row" style="margin-top:8px">
+            <button class="btn" id="btn-gpu-status">🔍 检测 GPU 状态</button>
+            <button class="btn" id="btn-install-gpu">⬇ 下载 GPU 组件</button>
+          </div>
+          <div class="field-tip" id="set-gpu-hint" style="margin-top:6px;color:#8b9199"></div>
+        </div>
           </div>
 
           <div class="pane-divider"></div>

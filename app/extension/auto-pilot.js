@@ -657,13 +657,21 @@
     // ① 切到「章节测验」附件
     if (!clickAttachByKeyword('测验')) {
       flash('⚠ 这篇没有「章节测验」附件', 'warn')
-      return { ok: false, reason: 'no-quiz-attach' }
+      return {
+        ok: false,
+        reason: 'no-quiz-attach',
+        detail: `页面上找不到「章节测验」附件（当前附件=${currentAttachTitle() || '未知'}，页面 iframe=${document.querySelectorAll('iframe').length} 个）`,
+      }
     }
     // ② 等测验页就绪
     const d3 = await waitQuizFrame(CFG.frameTimeoutMs)
     if (!d3) {
       flash('⚠ 测验页加载超时', 'warn')
-      return { ok: false, reason: 'frame-timeout' }
+      return {
+        ok: false,
+        reason: 'frame-timeout',
+        detail: '测验 iframe 没在时限内加载出来（网络慢，或这一章其实没有测验附件）',
+      }
     }
 
     // ③ 已经是批阅页 → 说明做过了
@@ -706,7 +714,20 @@
     const questions = grabQuestions(d3, decodeCtx)
     if (!questions.length) {
       flash('⚠ 没抓到题目，请检查页面', 'warn')
-      return { ok: false, reason: 'no-questions' }
+return {
+        ok: false,
+        reason: 'no-questions',
+        detail: (() => {
+          /* ★ 2026-10-25 修：这里原来用了 quizFrameDoc（那是个**函数**，不是 document），
+             调 .body 只会拿到 undefined。正确的变量是本函数的 d3。 */
+          try {
+            const b = d3.body
+            const txt = b ? String(b.innerText || '').replace(/\s+/g, ' ').slice(0, 80) : ''
+            const n = d3.querySelectorAll('.TiMu').length
+            return `测验页里没解析出题目（.TiMu=${n} 个，正文 ${b ? String(b.innerText || '').length : 0} 字，开头：${txt || '空'}）`
+          } catch (e) { return '测验页里没解析出题目（读取页面内容时出错：' + ((e && e.message) || e) + '）' }
+        })(),
+      }
     }
     diag.quizInfo = `${questions.length} 题`
 
@@ -741,7 +762,11 @@
     const r = await apiPost('/ext/quizAnswer', payload, 120000)
     if (!r.body) {
       flash('⚠ 应用无响应，请确认学习通学伴已打开', 'err')
-      return { ok: false, reason: 'app-unreachable' }
+return {
+        ok: false,
+        reason: 'app-unreachable',
+        detail: '连不上学习通学伴应用（请确认应用窗口还开着、没有被关掉）',
+      }
     }
     if (!r.body.ok) {
       const err = String(r.body.error || '')
@@ -755,7 +780,11 @@
     const answers = r.body.answers || []
     if (!answers.length) {
       flash('⚠ AI 没给出可用答案，本次不提交', 'warn')
-      return { ok: false, reason: 'no-answers' }
+return {
+        ok: false,
+        reason: 'no-answers',
+        detail: `AI 没返回任何可用答案（共 ${questions.length} 题）`,
+      }
     }
 
     // ⑦.5 展示作答依据：用户要能确认「答案是 AI 根据课程内容答的」，而不是黑盒。
@@ -788,7 +817,11 @@
     const btn = findSubmitBtn(d3)
     if (!btn) {
       flash('⚠ 没找到提交按钮，请手动提交', 'warn')
-      return { ok: false, reason: 'no-submit' }
+return {
+        ok: false,
+        reason: 'no-submit',
+        detail: '测验页里找不到「提交」按钮（可能页面结构变了，请手动提交）',
+      }
     }
     diag.phase = 'submitting'
 
@@ -809,8 +842,13 @@
       fireClick(btn.node, d3)
     } catch (e) {
       autoConfirm.restore()
-      flash('⚠ 提交失败：' + (e?.message || e), 'warn')
-      return { ok: false, reason: 'submit-error' }
+      const em = (e && e.message) || String(e || '未知')
+      flash('⚠ 提交失败：' + em, 'warn')
+      return {
+        ok: false,
+        reason: 'submit-error',
+        detail: '点「提交」时出错：' + em,
+      }
     }
 
     // 等确认框出现并处理它（原生 confirm 已被拦截自动同意；自绘弹层要手动点）
@@ -870,12 +908,20 @@
     }
     if (/确认提交/.test(after)) {
       flash('❌ 提交未完成，确认框未能点掉，请手动提交', 'err')
-      return { ok: false, reason: 'confirm-failed' }
+return {
+        ok: false,
+        reason: 'confirm-failed',
+        detail: '没有点掉「确认提交」弹窗（请手动确认一次）',
+      }
     }
     // 既没看到完成、也没看到确认框：可能还在处理中，也可能真没交上。
     // 不记账，让下一轮还能重试（避免「假成功」把章节永久跳过）。
     flash('⚠ 提交结果未能确认，下次会再试一次', 'warn')
-    return { ok: false, reason: 'submit-unverified' }
+return {
+        ok: false,
+        reason: 'submit-unverified',
+        detail: '点了提交但页面没变成「已提交/已批阅」状态，请人工核对这一章',
+      }
   }
 
   /* ═══════════════════════ 作答依据展示 ═══════════════════════ */
@@ -1508,7 +1554,7 @@
   /** 采样一次播放状态，返回是否在推进 */
   function samplePlay() {
     const v = findVideo()
-    if (!v) return { ok: false, reason: 'no-video' }
+if (!v) return { ok: false, reason: 'no-video', detail: '当前页面没找到 video 元素（可能不是播放页，或视频还没加载出来）' }
     if (v.ended) return { ok: false, reason: 'ended', ratio: 1 }
     const dur = Number(v.duration) || 0
     const cur = Number(v.currentTime) || 0
@@ -1561,6 +1607,8 @@
     const idx = Math.min(failGuard.count, FAIL_BACKOFF.length - 1)
     failGuard.until = Date.now() + FAIL_BACKOFF[idx]
     diag.lastError = `${reason}: ${msg || ''}`
+    // ★ 2026-10-25：失败详情必须落日志，用户事后能查（原来只 flash 一下就没了）
+    try { LOG(`[fail] ${reason}｜${msg || '(无详情)'}`) } catch { /* ignore */ }
     syncGuardDiag()
 
     if (failGuard.count >= FAIL_GIVEUP) {
@@ -1802,7 +1850,7 @@
 
   async function runOneChapter() {
     const ch = currentChapter()
-    if (!ch) return { ok: false, reason: 'no-chapter' }
+if (!ch) return { ok: false, reason: 'no-chapter', detail: '左侧章节目录没找到当前选中项（请手动点一下要学的那一章）' }
     diag.chapterId = ch.chapterId
     diag.chapterName = ch.name
     diag.unfinish = ch.unfinish
@@ -1825,7 +1873,11 @@
       diag.phase = 'playing'
       const started = await ensurePlaying()
       if (!started) {
-        return { ok: false, reason: 'cannot-play' }
+return {
+        ok: false,
+        reason: 'cannot-play',
+        detail: '视频没能启动播放（浏览器可能拦截了自动播放，请手动点一下播放按钮）',
+      }
       }
       /* ★ 2026-10-25：刚开始播放就立刻预抓一次，争取最大并行时间窗。
        * 主循环里还会按比例再次尝试（同一章只发一次，不会重复）。 */

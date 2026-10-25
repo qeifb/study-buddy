@@ -217,9 +217,26 @@ async function transcribe(mediaPath, { outPath, onLog }) {
       const mode = String(st.accelMode || 'auto').toLowerCase()
       const dev = (!on || mode === 'cpu') ? 'cpu' : (mode === 'gpu' ? 'cuda' : 'auto')
       args.push('--device', dev)
+
+      /* ★ 2026-10-25：转码速度（控制 CPU 占用）
+       *   performance = 占用空闲 CPU 的 80%
+       *   balanced    = 60%（默认）
+       *   quiet       = 40%
+       *   具体线程数由 transcribe.py 按「当前系统占用」实时反算。 */
+      const spd = ['performance', 'balanced', 'quiet'].includes(String(st.transSpeed || ''))
+        ? String(st.transSpeed) : 'balanced'
+      args.push('--speed', spd)
+
+      /* ★ 2026-10-25：CPU+GPU 一起转（真正的「硬件加速」）
+       *   只有硬件加速开着 + accelMode 不是 cpu + 用户开了 parallel 才传 1。
+       *   transcribe.py 会再自己验证 GPU 真可用（cublas/cudnn 缺失就退回单路）。 */
+      const wantPar = on && mode !== 'cpu' && st.hardwareParallel === true
+      args.push('--parallel', wantPar ? '1' : '0')
     } catch {
       /* 读设置失败就用 auto，保证功能不因此不可用 */
       args.push('--device', 'auto')
+      args.push('--speed', 'balanced')
+      args.push('--parallel', '0')
     }
     const env = { ...process.env, HF_HUB_OFFLINE: '1', PYTHONIOENCODING: 'utf-8' }
     const child = spawn(pyenv, args, { env, windowsHide: true })

@@ -620,9 +620,34 @@ body.side-collapsed .sidebar { display: none; }
 
 
 /* 复选框/单选项行 */
-.chk { display: flex; align-items: flex-start; gap: 8px; cursor: pointer; font-size: 12.5px; line-height: 1.6; color: #b8bec6; }
-.chk input { margin-top: 3px; flex: 0 0 auto; }
-.chk span { flex: 1; }
+/* ★ 2026-10-25 修：复选框/单选框错位
+ *
+ * 原来 .field label { display:block } (特异性 0,1,1) 覆盖了
+ *   .chk { display:flex } (0,1,0)，
+ * 而 .field input { width:100% } 又把 checkbox 撑满一行，
+ * 导致截图里「复选框独占一行、文字掉到下一行」的错位。
+ *
+ * 现在用 .field label.chk (0,2,1) 提权，并显式把 input 宽度改回 auto。
+ */
+.field label.chk {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: #b8bec6;
+  margin-bottom: 0;
+}
+.field label.chk input[type="checkbox"],
+.field label.chk input[type="radio"] {
+  width: auto;
+  flex: 0 0 auto;
+  margin: 3px 0 0 0;
+  padding: 0;
+  min-width: 0;
+}
+.field label.chk span { flex: 1; }
 
 
 /* 设置页的分页标签（2026-10-25 新增） */
@@ -641,3 +666,18 @@ body.side-collapsed .sidebar { display: none; }
 .pane-divider { height: 1px; background: rgba(255,255,255,.08); margin: 18px 0; }
 .optional { font-weight: 400; color: #8b9199; font-size: 11.5px; }
 .field-tip code { background: rgba(255,255,255,.08); padding: 1px 4px; border-radius: 3px; font-size: 11.5px; }
+
+
+/* N 卡不可用时，硬件加速相关控件变灰（2026-10-25） */
+.no-nvidia .chk,
+.no-nvidia .btn {
+  opacity: .45;
+  pointer-events: none;
+}
+.no-nvidia::after {
+  content: '（此设备无 NVIDIA 显卡，硬件加速不可用）';
+  display: block;
+  margin-top: 4px;
+  font-size: 11.5px;
+  color: #ff9a9a;
+}

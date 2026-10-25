@@ -80,6 +80,16 @@ contextBridge.exposeInMainWorld('studyBuddy', {
   },
 
   /** 转写环境（faster-whisper）：检查 + 一键安装 */
+  gpu: {
+
+    status: () => ipcRenderer.invoke('gpu:status'),
+
+    install: () => ipcRenderer.invoke('gpu:install'),
+
+    onInstallEvent: (h) => { const f = (_e, d) => h(d); ipcRenderer.on('gpu:install:event', f); return () => ipcRenderer.removeListener('gpu:install:event', f) },
+
+  },
+
   disk: {
 
     usage: () => ipcRenderer.invoke('disk:usage'),

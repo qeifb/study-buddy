@@ -62,6 +62,12 @@ const DEFAULTS = {
    */
 
   hardwareAccel: true,
+  /* ★ 2026-10-25 转码速度：控制 CPU 占用。注意是「空闲部分」的百分比：
+   *   当前已用 20% → performance 上限 = 20 + (100-20)*0.8 = 84% */
+  transSpeed: 'balanced',
+  /* ★ 2026-10-25 CPU+GPU 一起转（真正的硬件加速）。
+   *   需要 NVIDIA 卡 + 已装 GPU 组件；缺任一则自动退回单路。 */
+  hardwareParallel: false,
 
   accelMode: 'auto',
   /** 系统提示词：约束「不遗漏不虚报不弄虚作假」 */

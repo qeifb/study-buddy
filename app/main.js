@@ -1702,6 +1702,113 @@ ipcMain.handle('disk:usage', async () => {
   }
 })
 
+/**
+ * GPU 状态检测（2026-10-25 新增）
+ *
+ * 用户要求：「注明只有 N 卡才能开硬件加速，其他卡就把按钮变灰」
+ *
+ * 三层判断：
+ *   ① 有没有 NVIDIA CUDA 设备（ctranslate2.get_cuda_device_count）
+ *   ② 有没有 cublas/cudnn（真能推理才叫可用；只有驱动不够）
+ *   ③ 返回人话状态给界面
+ */
+ipcMain.handle('gpu:status', async () => {
+  const pyenv = path.join(TOOLS_DIR, 'pyenv', 'Scripts', 'python.exe')
+  if (!fs.existsSync(pyenv)) {
+    return { ok: false, hasNvidia: false, dllOk: false, text: '转写环境还没装，无法检测 GPU' }
+  }
+  return new Promise((resolve) => {
+    const script = `
+import json, os, sys
+out = {"hasNvidia": False, "dllOk": False, "devices": 0, "missing": [], "name": ""}
+try:
+    import ctranslate2
+    out["devices"] = ctranslate2.get_cuda_device_count()
+    out["hasNvidia"] = out["devices"] > 0
+except Exception as e:
+    out["err"] = str(e)[:150]
+# 显卡名
+try:
+    import subprocess
+    r = subprocess.run(["nvidia-smi", "--query-gpu=name", "--format=csv,noheader"],
+                       capture_output=True, text=True, timeout=8)
+    out["name"] = (r.stdout or "").strip().splitlines()[0] if r.stdout.strip() else ""
+except Exception:
+    pass
+# cublas / cudnn
+import ctypes
+base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+nvdir = os.path.join(base, "pyenv", "Lib", "site-packages", "nvidia")
+def find(dll):
+    try:
+        ctypes.CDLL(dll); return True
+    except OSError:
+        pass
+    if os.path.isdir(nvdir):
+        for root, _d, files in os.walk(nvdir):
+            if dll in files:
+                try:
+                    ctypes.CDLL(os.path.join(root, dll)); return True
+                except OSError:
+                    pass
+    return False
+for d in ("cublas64_12.dll", "cudnn64_9.dll"):
+    if not find(d):
+        out["missing"].append(d)
+out["dllOk"] = len(out["missing"]) == 0
+print(json.dumps(out, ensure_ascii=False))
+`
+    const tmp = path.join(os.tmpdir(), 'sb-gpu-' + Date.now() + '.py')
+    fs.writeFileSync(tmp, script, 'utf8')
+    require('node:child_process').execFile(pyenv, [tmp], { timeout: 60000, windowsHide: true },
+      (err, stdout) => {
+        try { fs.rmSync(tmp, { force: true }) } catch { /* ignore */ }
+        let info = {}
+        try { info = JSON.parse(String(stdout || '').trim().split('\n').pop()) } catch { /* ignore */ }
+        const hasNvidia = info.hasNvidia === true
+        const dllOk = info.dllOk === true
+        let text = ''
+        if (!hasNvidia) {
+          text = '没有检测到 NVIDIA 显卡（A 卡 / Intel 集显不支持 GPU 加速），硬件加速不可用'
+        } else if (!dllOk) {
+          text = '检测到 ' + (info.name || 'NVIDIA 显卡') + '，但缺少 GPU 组件：' + (info.missing || []).join('、') + '（点下方「下载 GPU 组件」安装）'
+        } else {
+          text = '检测到 ' + (info.name || 'NVIDIA 显卡') + '，GPU 加速可用'
+        }
+        resolve({ ok: true, hasNvidia, dllOk, devices: info.devices || 0, name: info.name || '', missing: info.missing || [], text })
+      })
+  })
+})
+
+/**
+ * 下载 GPU 组件（nvidia-cublas-cu12 + nvidia-cudnn-cu12，约 1.8GB）
+ */
+ipcMain.handle('gpu:install', async (event) => {
+  const pyenv = path.join(TOOLS_DIR, 'pyenv', 'Scripts', 'python.exe')
+  if (!fs.existsSync(pyenv)) return { ok: false, error: '转写环境还没装' }
+  const send = (type, text) => {
+    try { if (!event.sender.isDestroyed()) event.sender.send('gpu:install:event', { type, text }) } catch { /* ignore */ }
+    appendAppLog('[gpu:install] ' + text)
+  }
+  send('stage', '开始下载 GPU 组件（约 1.8GB，请耐心等待）…')
+  return new Promise((resolve) => {
+    require('node:child_process').execFile(pyenv,
+      ['-m', 'pip', 'install', 'nvidia-cublas-cu12', 'nvidia-cudnn-cu12',
+        '--disable-pip-version-check', '-i', 'https://pypi.tuna.tsinghua.edu.cn/simple'],
+      { timeout: 3600000, windowsHide: true, maxBuffer: 8 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        if (err) {
+          const msg = String(stderr || err.message || '').slice(-1500)
+          send('failed', 'GPU 组件安装失败')
+          resolve({ ok: false, error: msg })
+        } else {
+          send('done', 'GPU 组件安装成功')
+          resolve({ ok: true })
+        }
+      })
+  })
+})
+
 ipcMain.handle('transcribe:status', async () => {
   const p = transcribePaths()
   const out = {

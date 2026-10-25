@@ -742,6 +742,10 @@ async function openSettings() {
   $('#set-vision-model').value = s.visionModel || 'qwen3-vl-plus'
   $('#set-vision-base').value = s.visionBaseUrl || ''
   $('#set-vision-key').value = s.visionApiKey || ''
+  /* ★ 2026-10-25：转码速度 + CPU/GPU 并行开关 */
+  try { syncSpeedUI(s) } catch { /* ignore */ }
+  /* 打开设置时顺便检测 GPU，决定「硬件加速」相关控件是否可用 */
+  setTimeout(() => { try { checkGpuStatus(true) } catch { /* ignore */ } }, 300)
     /* 硬件加速设置（2026-10-25） */
     try { syncAccelUI(s) } catch { /* ignore */ }
   $('#set-key').value = s.apiKey || ''
@@ -824,6 +828,10 @@ async function saveSettings() {
   visionApiKey: $('#set-vision-key').value.trim(),
 
     hardwareAccel: (() => { const el = document.getElementById('set-hwaccel'); return !el || el.checked !== false })(),
+
+    transSpeed: (() => { const r = document.querySelector('input[name="transspeed"]:checked'); return r ? r.value : 'balanced' })(),
+
+    hardwareParallel: (() => { const el = document.getElementById('set-parallel'); return !!(el && el.checked) })(),
 
     accelMode: (() => { const r = document.querySelector('input[name="accelmode"]:checked'); return r ? r.value : 'auto' })() || 'qwen3-vl-plus',
     apiKey: $('#set-key').value.trim(),
@@ -1480,3 +1488,103 @@ async function testVisionModel() {
 }
 
 try { $('#btn-test-vision').addEventListener('click', testVisionModel) } catch { /* ignore */ }
+
+
+/* ══════ 转码速度 + GPU 状态（2026-10-25 新增）══════ */
+
+/** 回填转码速度 UI */
+function syncSpeedUI(s) {
+  const speed = (s && s.transSpeed) || 'balanced'
+  document.querySelectorAll('input[name="transspeed"]').forEach((r) => {
+    r.checked = (r.value === speed)
+  })
+  const par = document.getElementById('set-parallel')
+  if (par) par.checked = (s && s.hardwareParallel === true)
+
+  // 绑定一次
+  if (!syncSpeedUI.bound) {
+    syncSpeedUI.bound = true
+    document.querySelectorAll('input[name="transspeed"]').forEach((r) => {
+      r.addEventListener('change', () => {
+        const h = document.getElementById('set-speed-hint')
+        if (h) {
+          const names = { performance: '性能优先', balanced: '平衡模式', quiet: '静音模式' }
+          h.textContent = '当前：' + (names[r.value] || r.value)
+        }
+      })
+    })
+    const btnS = document.getElementById('btn-gpu-status')
+    if (btnS) btnS.addEventListener('click', checkGpuStatus)
+    const btnI = document.getElementById('btn-install-gpu')
+    if (btnI) btnI.addEventListener('click', installGpu)
+  }
+}
+
+/** 检测 GPU 状态，并给不可用的控件变灰 */
+async function checkGpuStatus(silent) {
+  const hint = document.getElementById('set-gpu-hint')
+  const wrap = document.getElementById('set-parallel-wrap')
+  const btnI = document.getElementById('btn-install-gpu')
+  try {
+    const r = await window.studyBuddy.gpu.status()
+    if (hint) {
+      hint.textContent = r.text || ''
+      hint.style.color = r.hasNvidia && r.dllOk ? '#63cf7f' : (r.hasNvidia ? '#ffc857' : '#ff6b6b')
+    }
+
+    // ① 没有 N 卡 → 并行开关变灰、下载按钮变灰
+    const noNv = !r.hasNvidia
+    if (wrap) {
+      wrap.classList.toggle('no-nvidia', noNv)
+      if (noNv) {
+        const cb = document.getElementById('set-parallel')
+        if (cb) cb.checked = false
+      }
+    }
+    if (btnI) btnI.disabled = noNv || r.dllOk
+
+    // ② 有 N 卡但缺组件 → 提示下载
+    if (r.hasNvidia && !r.dllOk) {
+      if (btnI) btnI.disabled = false
+      if (btnI) btnI.textContent = '⬇ 下载 GPU 组件（约 1.8GB）'
+    } else if (r.dllOk) {
+      if (btnI) btnI.textContent = '✅ GPU 组件已就绪'
+    }
+    if (!silent) {
+      // 用户主动点击时也写进日志，方便排查
+      try { window.studyBuddy.app.log && window.studyBuddy.app.log('[gpu] ' + (r.text || '')) } catch { /* ignore */ }
+    }
+    return r
+  } catch (e) {
+    if (hint) { hint.textContent = '检测失败：' + (e && e.message ? e.message : e); hint.style.color = '#ff6b6b' }
+    return null
+  }
+}
+
+/** 下载 GPU 组件 */
+async function installGpu() {
+  const btn = document.getElementById('btn-install-gpu')
+  const hint = document.getElementById('set-gpu-hint')
+  if (!confirm('将下载 GPU 组件（nvidia-cublas + cudnn，约 1.8GB）。\n\n仅 NVIDIA 显卡需要，用于 CPU+GPU 同时转码。要现在下载吗？')) return
+  if (btn) { btn.disabled = true; btn.textContent = '下载中…' }
+  if (hint) { hint.textContent = '正在下载，请保持网络畅通（可能需要几分钟）…'; hint.style.color = '#8cc4ff' }
+  try {
+    const off = window.studyBuddy.gpu.onInstallEvent((ev) => {
+      if (hint && ev && ev.text) hint.textContent = ev.text
+    })
+    const r = await window.studyBuddy.gpu.install()
+    try { off && off() } catch { /* ignore */ }
+    if (r && r.ok) {
+      if (hint) { hint.textContent = 'GPU 组件安装成功！可以勾选「CPU+GPU 一起转码」了'; hint.style.color = '#63cf7f' }
+      await checkGpuStatus(true)
+    } else {
+      if (hint) { hint.textContent = '安装失败：' + ((r && r.error) || '未知'); hint.style.color = '#ff6b6b' }
+      if (btn) btn.disabled = false
+    }
+  } catch (e) {
+    if (hint) { hint.textContent = '安装失败：' + (e && e.message ? e.message : e); hint.style.color = '#ff6b6b' }
+    if (btn) btn.disabled = false
+  } finally {
+    if (btn) btn.textContent = '⬇ 下载 GPU 组件'
+  }
+}
