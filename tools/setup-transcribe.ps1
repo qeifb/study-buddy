@@ -183,7 +183,16 @@ if ($LASTEXITCODE -ne 0) { Die "pip 安装失败，请检查网络（可尝试�
 
 # 若之前装过 nvidia-*（旧版残留），主动卸掉，避免白占 2GB
 Step "清理用不到的 CUDA 包（纯 CPU 转写不需要）"
-& $PyExe -m pip uninstall -y -q nvidia-cublas-cu12 nvidia-cudnn-cu12 nvidia-cuda-nvrtc-cu12 2>$null
+    # ★ 2026-10-25 修：pip uninstall 在「包本来就没装」时返回退出码 1（只是 WARNING），
+    #   而我们没重置 $LASTEXITCODE，导致后面的检查继承了这个 1，把「本来没事」判成失败。
+    #   这是正常情况（新版本来就不装 nvidia），绝不能因此让整个安装失败。
+    $prevEAP = $ErrorActionPreference
+    $ErrorActionPreference = "SilentlyContinue"
+    try {
+        & $PyExe -m pip uninstall -y -q nvidia-cublas-cu12 nvidia-cudnn-cu12 nvidia-cuda-nvrtc-cu12 2>&1 | Out-Null
+    } catch { }
+    $ErrorActionPreference = $prevEAP
+    $global:LASTEXITCODE = 0   # 关键：显式清零，避免污染后续判断
 Warn "CUDA 包清理完成（若本来就没有，属正常）"
 $fw = & $PyExe -c "import faster_whisper;print(faster_whisper.__version__)"
 if (-not $fw) { Die "faster-whisper 装上了但导入失败。" }
@@ -298,3 +307,11 @@ Ok "全部完成！转写环境已就绪。"
 Restore-ConsoleEncoding
 Write-Host "  下次点「课程日志」抓取时，就会自动调用它。" -ForegroundColor Green
 Write-Host ""
+
+
+# ★ 2026-10-25 修：显式 exit 0
+#   本脚本会被 启动学习通学伴.cmd 用 `if errorlevel 1` 判定成败。
+#   若此处不写 exit 0，PowerShell 会把「最后一条外部命令的 $LASTEXITCODE」
+#   当作进程退出码 —— 而中间 pip 的 WARNING/管道可能把它弄成 1，
+#   于是「装成功了」会被 cmd 判成「装失败」（用户已实测踩到）。
+exit 0
