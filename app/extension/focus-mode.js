@@ -221,23 +221,25 @@
     btn.className = '__sb_focus_btn'
     btn.style.cssText = [
       'margin-left:8px', 'padding:3px 9px', 'border-radius:7px', 'cursor:pointer',
-      'border:1px solid rgba(63,207,127,.5)', 'background:rgba(63,207,127,.22)',
-      'color:#8ff0bc', 'font:inherit', 'font-size:11.5px',
+      // ★ 2026-10-26：原来「半透明绿底 + 浅绿字」在浅色角标上完全看不清，
+      //   改为实底深绿 + 白字，任何底色上都清晰。
+      'border:1px solid #237a47', 'background:#2f9e5f',
+      'color:#ffffff', 'font:inherit', 'font-size:11.5px', 
     ].join(';')
     btn.textContent = isOff() ? '已关闭' : '守护中'
     btn.title = '点一下可关闭「暂停自动续播」'
-    btn.style.background = isOff() ? 'rgba(255,255,255,.08)' : 'rgba(63,207,127,.22)'
-    btn.style.color = isOff() ? '#9aa0a8' : '#8ff0bc'
-    btn.style.borderColor = isOff() ? 'rgba(255,255,255,.14)' : 'rgba(63,207,127,.5)'
+    btn.style.background = isOff() ? '#3c4450' : '#2f9e5f'
+    btn.style.color = '#ffffff'
+    btn.style.borderColor = isOff() ? '#2a313a' : '#237a47'
 
     btn.onclick = (e) => {
       e.stopPropagation()
       const next = !isOff()
       setOff(next)
       btn.textContent = next ? '已关闭' : '守护中'
-      btn.style.background = next ? 'rgba(255,255,255,.08)' : 'rgba(63,207,127,.22)'
-      btn.style.color = next ? '#9aa0a8' : '#8ff0bc'
-      btn.style.borderColor = next ? 'rgba(255,255,255,.14)' : 'rgba(63,207,127,.5)'
+      btn.style.background = next ? '#3c4450' : '#2f9e5f'
+      btn.style.color = '#ffffff'
+      btn.style.borderColor = next ? '#2a313a' : '#237a47'
       if (next) flashTip('已关闭自动续播', 'rgba(255,255,255,.9)')
     }
     badge.appendChild(btn)

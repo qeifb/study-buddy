@@ -37,6 +37,7 @@
       'position:fixed', 'right:16px', 'top:76px', 'z-index:2147483647',
       'display:flex', 'align-items:center', 'gap:8px',
       'padding:8px 12px', 'border-radius:10px',
+      // ★ 2026-10-26：给足不透明度，避免下面任何透明化操作让文字看不清
       'background:rgba(20,22,26,.92)', 'color:#e8eaed',
       'font:12px/1.5 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif',
       'box-shadow:0 6px 22px rgba(0,0,0,.35)', 'cursor:move',

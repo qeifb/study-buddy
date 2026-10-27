@@ -184,6 +184,16 @@ async function downloadVideo(url, destPath, referer) {
  * 转写：调用本机已装好的 faster-whisper 环境（DSH 插件那套）。
  * 找不到就明确报错，不假装成功。
  */
+
+/* ───────────── 正在转码的计数（2026-10-27） ─────────────
+ * 用途：性能测试与自己抢 CPU/GPU，转码中测出来的数字是错的，所以要能被拦住。
+ * 用计数而不是布尔：自动抓取允许并发，可能同时有好几个 transcribe 在跑。
+ * 只在本模块内维护，通过 exported 的 isTranscribing() 对外暴露。 */
+let _transcribingCount = 0
+function beginTranscribing() { _transcribingCount++ }
+function endTranscribing() { _transcribingCount = Math.max(0, _transcribingCount - 1) }
+function isTranscribing() { return _transcribingCount > 0 }
+
 async function transcribe(mediaPath, { outPath, onLog }) {
   // 转写环境与模型 2026-10-22 起随应用一起放在 <root>\tools（原 %LOCALAPPDATA%\dsh-study-companion）
   const { TOOLS_DIR } = require('./paths')
@@ -206,16 +216,26 @@ async function transcribe(mediaPath, { outPath, onLog }) {
     const args = [scriptPath, mediaPath, '--out', outPath, '--language', 'zh']
     if (fs.existsSync(modelDir)) { args.push('--model-dir', modelDir) }
 
-    /* ★ 2026-10-25：按设置决定硬件加速方式
-     *   hardwareAccel=false 或 accelMode='cpu' → --device cpu（强制 CPU）
-     *   accelMode='gpu'                        → --device cuda（强制 GPU，失败报错）
-     *   其它                                    → --device auto（默认：有 NVIDIA 就 GPU，失败自动退 CPU） */
+    /* ★ 2026-10-26：accelMode 是硬件加速的唯一开关（hardwareAccel 已删除）
+     *   cpu  → --device cpu（强制 CPU）
+     *   gpu  → --device cuda（强制 GPU，失败报错）
+     *   auto → --device auto（有 NVIDIA 就 GPU，失败自动退 CPU）+ 并行 */
     try {
       const { readSettings } = require('./ai')
       const st = readSettings() || {}
-      const on = st.hardwareAccel !== false
       const mode = String(st.accelMode || 'auto').toLowerCase()
-      const dev = (!on || mode === 'cpu') ? 'cpu' : (mode === 'gpu' ? 'cuda' : 'auto')
+      let dev = 'cpu'
+      let wantParallel = false
+      if (mode === 'cpu') {
+        dev = 'cpu'
+        wantParallel = false
+      } else if (mode === 'gpu') {
+        dev = 'cuda'
+        wantParallel = false
+      } else {
+        dev = 'auto'
+        wantParallel = true
+      }
       args.push('--device', dev)
 
       /* ★ 2026-10-25：转码速度（控制 CPU 占用）
@@ -226,12 +246,8 @@ async function transcribe(mediaPath, { outPath, onLog }) {
       const spd = ['performance', 'balanced', 'quiet'].includes(String(st.transSpeed || ''))
         ? String(st.transSpeed) : 'balanced'
       args.push('--speed', spd)
-
-      /* ★ 2026-10-25：CPU+GPU 一起转（真正的「硬件加速」）
-       *   只有硬件加速开着 + accelMode 不是 cpu + 用户开了 parallel 才传 1。
-       *   transcribe.py 会再自己验证 GPU 真可用（cublas/cudnn 缺失就退回单路）。 */
-      const wantPar = on && mode !== 'cpu' && st.hardwareParallel === true
-      args.push('--parallel', wantPar ? '1' : '0')
+      /* wantParallel 由上面的 accelMode 决定（auto = 开并行） */
+      args.push('--parallel', wantParallel ? '1' : '0')
     } catch {
       /* 读设置失败就用 auto，保证功能不因此不可用 */
       args.push('--device', 'auto')
@@ -240,6 +256,12 @@ async function transcribe(mediaPath, { outPath, onLog }) {
     }
     const env = { ...process.env, HF_HUB_OFFLINE: '1', PYTHONIOENCODING: 'utf-8' }
     const child = spawn(pyenv, args, { env, windowsHide: true })
+    /* ★ 2026-10-27：登记「正在转码」，供性能测试等功能判断是否该让路。
+     * 用计数而不是布尔：自动抓取允许并发，可能同时有几个 transcribe 在跑。
+     * 无论成功、失败、启动失败，都必须在收尾时减回去。 */
+    beginTranscribing()
+    let ended = false
+    const endOnce = () => { if (!ended) { ended = true; endTranscribing() } }
     let stderr = ''
     child.stderr.on('data', (d) => {
       const s = String(d)
@@ -247,8 +269,9 @@ async function transcribe(mediaPath, { outPath, onLog }) {
       const line = s.trim()
       if (line && onLog) onLog(line)
     })
-    child.on('error', (e) => reject(new Error(`无法启动转写进程：${e.message}`)))
+    child.on('error', (e) => { endOnce(); reject(new Error(`无法启动转写进程：${e.message}`)) })
     child.on('close', (code) => {
+      endOnce()
       try {
         if (fs.existsSync(outPath)) return resolve(JSON.parse(fs.readFileSync(outPath, 'utf8')))
       } catch { /* 落到下面 */ }
@@ -270,7 +293,7 @@ async function transcribe(mediaPath, { outPath, onLog }) {
 async function captureLessonViaExtension({ ext, tabId, notesDir, onStage, reuse = true }) {
   const say = (stage, text) => { try { onStage && onStage(stage, text) } catch { /* ignore */ } }
 
-  say('scan', '正在通过浏览器插件读取当前页面…')
+  say('scan', '页面读取｜进行中')
 
   // 扩展每次领到任务都会**先上报一次 running**（background.js:594），跑完才报 done/failed。
   // 早期这里只要收到一次回调就当结果结算，于是任务刚派发就被判成「扩展没能读到页面」——
@@ -296,8 +319,8 @@ async function captureLessonViaExtension({ ext, tabId, notesDir, onStage, reuse 
   // 1) 让扩展在页面（含所有 iframe）里找视频
   const found = await waitJob('findVideo')
 
-  say('probe', `已读取页面：${found.title || '(无标题)'}（扫描 ${found.frames || 0} 个框架）`)
-  if (found.chapterTitle) say('probe', `章节：${found.chapterTitle}`)
+  say('probe', `页面读取｜${found.title || '(无标题)'} · ${found.frames || 0} 层框架`)
+  if (found.chapterTitle) say('probe', `章节｜${found.chapterTitle}`)
 
   // 1.2) 课程名（总标题）不在播放页 DOM 里（2026-10-22 用 dumpChapterDom 证实），
   //      但用户开着的「课程目录页」（mooc2-ans/mycourse/stu）标题就是课程名。
@@ -311,7 +334,7 @@ async function captureLessonViaExtension({ ext, tabId, notesDir, onStage, reuse 
         const cached = readCourseNames(notesDir)[ids.courseId]
         if (cached) {
           found.courseTitle = cached
-          say('probe', `课程：${found.courseTitle}（本地记录）`)
+          say('probe', `课程｜${found.courseTitle}（本地记录）`)
         }
       } catch { /* ignore */ }
 
@@ -326,7 +349,7 @@ async function captureLessonViaExtension({ ext, tabId, notesDir, onStage, reuse 
             if (!title || title.length < 2 || title.length > 60 || GENERIC.test(title)) continue
             found.courseTitle = title
             writeCourseName(notesDir, ids.courseId, title)
-            say('probe', `课程：${title}（取自你打开的课程页）`)
+            say('probe', `课程｜${title}（来自当前课程页）`)
             break
           }
         } catch { /* ignore */ }
@@ -335,7 +358,7 @@ async function captureLessonViaExtension({ ext, tabId, notesDir, onStage, reuse 
       // c) 让扩展去扫所有学习通标签页（含课程目录页），抓左上角课程名
       if (!found.courseTitle) {
         try {
-          say('probe', '正在查询这门课的课程名…')
+          say('probe', '课程名｜查询中')
           const r = await waitJob('courseTitleAnyTab', { timeoutMs: 15000 })
           const list = (r && r.tabs) || []
           const re = new RegExp(`[?&]course_?id=${ids.courseId}(?:&|$)`, 'i')
@@ -346,20 +369,20 @@ async function captureLessonViaExtension({ ext, tabId, notesDir, onStage, reuse 
             if (good) {
               found.courseTitle = good
               writeCourseName(notesDir, ids.courseId, good)
-              say('probe', `课程：${good}`)
+              say('probe', `课程｜${good}`)
               break
             }
             const byTitle = String(t.title || '').trim()
             if (byTitle && !GENERIC.test(byTitle) && byTitle.length <= 60) {
               found.courseTitle = byTitle
               writeCourseName(notesDir, ids.courseId, byTitle)
-              say('probe', `课程：${byTitle}`)
+              say('probe', `课程｜${byTitle}`)
               break
             }
           }
-          if (!found.courseTitle) say('probe', `课程名没取到（courseId=${ids.courseId}）`)
+          if (!found.courseTitle) say('probe', `课程名缺失｜courseId=${ids.courseId}`)
         } catch (e) {
-          say('probe', `查询课程名失败：${e.message}`)
+          say('probe', `课程名查询失败｜${e.message}`)
         }
       }
     }
@@ -380,7 +403,7 @@ async function captureLessonViaExtension({ ext, tabId, notesDir, onStage, reuse 
       if (!log.course && found.courseTitle) {
         try { ensureCourseHeader(log.file, found.courseTitle) } catch { /* ignore */ }
       }
-      say('reused', `这节课本地已有日志：《${log.title}》（抓于 ${log.time || '未知时间'}，${log.segments} 段），直接复用，不再重复下载与转写`)
+      say('reused', `文字稿｜本地已有《${log.title}》· ${log.segments} 段 · 抓于 ${log.time || '未知'} · 直接复用`)
       return {
         file: log.file,
         lessonName: log.title,
@@ -399,7 +422,7 @@ async function captureLessonViaExtension({ ext, tabId, notesDir, onStage, reuse 
 
   // 2) 没找到视频时，尝试点开「视频」任务点后再找一次
   if (!src) {
-    say('probe', '还没看到视频，尝试点开视频任务点…')
+    say('probe', '视频元素｜未出现 · 尝试展开任务点')
     try {
       await waitJob('clickVideoTab', { timeoutMs: 12000 })
       await sleep(3000)
@@ -408,7 +431,7 @@ async function captureLessonViaExtension({ ext, tabId, notesDir, onStage, reuse 
       duration = again.video?.duration || duration
       if (again.chapterTitle) found.chapterTitle = again.chapterTitle
     } catch (e) {
-      say('probe', `尝试点开视频任务点失败：${e.message}`)
+      say('probe', `展开任务点失败｜${e.message}`)
     }
   }
 
@@ -430,9 +453,9 @@ async function captureLessonViaExtension({ ext, tabId, notesDir, onStage, reuse 
     mediaPath = path.join(notesDir, '.tmp', `${Date.now()}-lecture.mp4`)
     jsonPath = path.join(notesDir, '.tmp', `${Date.now()}-transcript.json`)
 
-    say('download', `正在下载视频（来源：${safeHost(src)}）…`)
+    say('download', `媒体下载｜进行中 · ${safeHost(src)}`)
     const bytes = await downloadVideo(src, mediaPath, found.url || found.videoFrameUrl || '')
-    say('download', `视频已下载 ${(bytes / 1048576).toFixed(1)} MB，开始转写…`)
+    say('download', `媒体下载｜完成 ${(bytes / 1048576).toFixed(1)} MB · 转写启动`)
 
     const r = await transcribe(mediaPath, { outPath: jsonPath, onLog: (l) => say('transcribe', l) })
     if (!r.ok) throw new Error(r.error || '转写失败')
@@ -440,7 +463,7 @@ async function captureLessonViaExtension({ ext, tabId, notesDir, onStage, reuse 
     const segments = r.segments || []
     duration = r.duration || duration
     const transcriptText = segments.map((s) => `[${mmss(s.start)}] ${s.text}`).join('\n')
-    say('transcribe', `转写完成：${segments.length} 段 / ${transcriptText.length} 字`)
+    say('transcribe', `转写完成｜${segments.length} 段 · ${transcriptText.length} 字`)
 
     if (!transcriptText) throw new Error('转写结果为空')
 
@@ -466,7 +489,7 @@ async function captureLessonViaExtension({ ext, tabId, notesDir, onStage, reuse 
     fs.mkdirSync(path.dirname(file), { recursive: true })
     fs.writeFileSync(file, `${header}\n${transcriptText}\n`, 'utf8')
 
-    say('saved', `课程日志已保存：${file}`)
+    say('saved', `文字稿已落盘｜${file}`)
 
     return {
       file,
@@ -499,12 +522,12 @@ function safeHost(u) {
 async function captureLesson({ conn, notesDir, onStage }) {
   const say = (stage, text) => { try { onStage && onStage(stage, text) } catch { /* ignore */ } }
 
-  say('scan', '正在扫描浏览器里打开的网课页面…')
+  say('scan', '页面扫描｜进行中')
   const { best, all } = await pickLessonTab(conn.port)
   if (!best) throw new Error('这个浏览器里没找到网课页面。请先在学习通里打开一节视频课。')
 
   const url = String(best.url || '')
-  say('connect', `已找到页面：${best.title || url}`)
+  say('connect', `页面就绪｜${best.title || url}`)
 
   const ws = await openWs(best.webSocketDebuggerUrl)
   const cdp = new Cdp(ws)
@@ -512,7 +535,7 @@ async function captureLesson({ conn, notesDir, onStage }) {
     await cdp.send('Page.enable')
     await cdp.send('Runtime.enable')
 
-    say('probe', '正在定位视频与章节信息…')
+    say('probe', '定位中｜视频 · 章节')
     const probe = await cdp.send('Runtime.evaluate', {
       expression: `(${pageProbe.toString()})()`,
       returnByValue: true,
@@ -522,7 +545,7 @@ async function captureLesson({ conn, notesDir, onStage }) {
 
     if (info.video && !info.video.src) {
       // 有的章节默认停在「学习目标」，需要点视频任务点
-      say('probe', '视频还没加载，尝试点开视频任务点…')
+      say('probe', '视频元素｜未就绪 · 尝试展开任务点')
       await cdp.send('Runtime.evaluate', {
         expression: `(() => {
           const els = [...document.querySelectorAll('[onclick]')].filter(e => /changeDisplayContent/.test(e.getAttribute('onclick')||'') && /视频|音频/.test(e.textContent||''))
@@ -543,9 +566,9 @@ async function captureLesson({ conn, notesDir, onStage }) {
     let note = ''
 
     if (info.video?.src) {
-      say('download', `正在下载视频（来源：${new URL(info.video.src).host}）…`)
+      say('download', `媒体下载｜进行中 · ${new URL(info.video.src).host}`)
       const bytes = await downloadVideo(info.video.src, mediaPath, info.url)
-      say('download', `视频已下载 ${(bytes / 1048576).toFixed(1)} MB，开始转写…`)
+      say('download', `媒体下载｜完成 ${(bytes / 1048576).toFixed(1)} MB · 转写启动`)
 
       const r = await transcribe(mediaPath, { outPath: jsonPath, onLog: (l) => say('transcribe', l) })
       if (!r.ok) throw new Error(r.error || '转写失败')
@@ -602,4 +625,4 @@ async function captureLesson({ conn, notesDir, onStage }) {
   }
 }
 
-module.exports = { captureLesson, captureLessonViaExtension }
+module.exports = { captureLesson, captureLessonViaExtension, isTranscribing }

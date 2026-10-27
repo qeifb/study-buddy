@@ -189,12 +189,6 @@ function renderMessage(m) {
   return wrap
 }
 
-function fmtSize(n) {
-  if (!n) return '—'
-  if (n < 1024) return n + ' B'
-  if (n < 1048576) return (n / 1024).toFixed(1) + ' KB'
-  return (n / 1048576).toFixed(1) + ' MB'
-}
 
 function fmtDur(sec) {
   const t = Math.max(0, Math.round(sec || 0))
@@ -620,8 +614,88 @@ async function loadBrowsers() {
 
 /* ───────────── 课程日志：抓取 ───────────── */
 
+/**
+ * 转码前确保做过性能测试（2026-10-26 用户要求）
+ *
+ * 用户原话：「以后打开应用开始转码前先出现一个弹窗，提示开始转码前先做一次性能测试」
+ *
+ * 规则：
+ *   · 从未测过 → 弹窗测试，用户点「应用所选模式」后继续
+ *   · 已测过 → 直接返回 true，不打断流程
+ *   · 用户点 × 关掉 → 当作跳过，继续转码（不能因为弹窗卡住用户）
+ *
+ * 返回 true = 可以继续转码
+ */
+/**
+ * 转码前确保有性能测试结果（2026-10-26 用户要求，**不允许跳过**）
+ *
+ * 用户原话：
+ *   「把这个性能测试流程绑死在转码第一步，不允许用户跳过，
+ *    不然会与我们的"硬件加速功能"不符，相当于说谎造假！」
+ *   「性能测试结果要保留，只保留最近一次的测试结果，用户测试完一次之后
+ *    后期再次使用应用，应用直接调用以往的测试结果和用户的选择就不用再次测试了」
+ *
+ * 三条规则：
+ *   ① 已有结果（perfTestedAt + accelMode + perfResult）→ 直接放行，不再测
+ *   ② 没有结果 → 强制弹窗测试，**关不掉、遮罩点不动**
+ *   ③ 只有「应用所选模式」能让它继续
+ *
+ * ⚠️ 与旧实现的区别：
+ *      旧版允许 × 关闭 / 点遮罩关闭都视为「跳过并继续」，
+ *      那等于用户可以绕过硬件加速的实测依据 → 已移除这两条出口。
+ *
+ * 返回 true = 有结果，可以继续转码
+ */
+async function ensurePerfTested() {
+  // ① 先问主进程有没有可用结果（不信任渲染层缓存）
+  try {
+    const st = await window.studyBuddy.perf.needTest()
+    if (st && st.ok && st.needTest === false) {
+      // 有结果：把结果同步到界面状态，不打断
+      try {
+        state.settings = Object.assign({}, state.settings || {}, {
+          accelMode: st.accelMode,
+          perfTestedAt: st.testedAt,
+          perfResult: st.result,
+        })
+      } catch { /* ignore */ }
+      return true
+    }
+  } catch { /* 查询失败 → 走强制测试 */ }
+
+  // ② 没有结果 → 强制测试，且不许跳过
+  return new Promise((resolve) => {
+    openPerfModal({ force: true })
+
+    const applyBtn = document.getElementById('perf-apply')
+
+    let done = false
+    const finish = () => {
+      if (done) return
+      done = true
+      resolve(true)
+    }
+
+    // 只有「应用所选模式」能完成；关闭按钮与遮罩已被禁用
+    if (applyBtn) {
+      applyBtn.onclick = async () => {
+        try {
+          await applyPerfMode()
+        } catch { /* ignore */ }
+        finish()
+      }
+    }
+  })
+}
+
+
 async function startCapture() {
   if (!state.selectedBrowser) return
+
+  /* 2026-10-26 用户要求：开始转码前先做一次性能测试并推荐模式。
+   * 已测过就不再打断（用户可在设置页手动「重新测试」）。 */
+  await ensurePerfTested()
+
   $('#modal-browser').hidden = true
 
   if (!state.activeId) await newChat()
@@ -754,7 +828,25 @@ async function openSettings() {
     out.className = 'test-result'
     out.textContent = '用上面填的地址 / 模型名 / Key 真实请求一次，不用先保存'
   }
+  refreshAccelLive()
   checkTranscribe()
+}
+
+/* ───────────── 「转码中，改动下次生效」提示（2026-10-27） ─────────────
+ * 用户问：「正在转码过程中更改转码设置，如原来是【自动】更改【仅CPU】后果是什么」
+ * 事实：capture.js 只在 spawn 前读一次 readSettings()，把 --device/--speed/--parallel
+ * 当命令行参数传给 python 子进程；子进程一启动这些值就固定了，
+ * 中途改设置对当前这节完全无效，只影响下一次。
+ * 所以必须有可见提示，否则用户以为改了已经在生效，出问题时无法判断当时用的哪套参数。 */
+async function refreshAccelLive() {
+  const tip = document.getElementById('set-accel-live')
+  if (!tip) return
+  let busy = false
+  try {
+    const r = await api.transcribe.busy()
+    busy = Boolean(r && r.busy)
+  } catch { /* 查不到就当作不忙，不要因为探测失败挡住设置页 */ }
+  tip.hidden = !busy
 }
 
 /* ───────────── 转写环境（faster-whisper） ───────────── */
@@ -827,17 +919,569 @@ async function saveSettings() {
   visionBaseUrl: $('#set-vision-base').value.trim(),
   visionApiKey: $('#set-vision-key').value.trim(),
 
-    hardwareAccel: (() => { const el = document.getElementById('set-hwaccel'); return !el || el.checked !== false })(),
 
     transSpeed: (() => { const r = document.querySelector('input[name="transspeed"]:checked'); return r ? r.value : 'balanced' })(),
 
-    hardwareParallel: (() => { const el = document.getElementById('set-parallel'); return !!(el && el.checked) })(),
-
-    accelMode: (() => { const r = document.querySelector('input[name="accelmode"]:checked'); return r ? r.value : 'auto' })() || 'qwen3-vl-plus',
+    accelMode: (() => { const r = document.querySelector('input[name="accelmode"]:checked'); return r ? r.value : 'auto' })(),
     apiKey: $('#set-key').value.trim(),
   })
   $('#modal-settings').hidden = true
 }
+
+  /* ══════════════════════════════════════════════════════════════
+   * 用户原话：
+   *   「以后打开应用开始转码前先出现一个弹窗，提示开始转码前先做一次性能测试，
+   *    看3种模式哪种合适，并把测试结果展示出来和模式选择框展示出来
+   *    并推荐用户选择哪种模式，比如你刚刚做的那个测试，结果是GPU最强，
+   *    就在弹出页面上提示用户可以选择纯GPU模式，
+   *    但仅仅只做推荐，用户想选择其他模式还是可以自行选择自己想要的模式，
+   *    记住我们只做推荐不需要写不推荐的备注说明」
+   *
+   * 设计：
+   *   · 三种模式各一行，行内是 radio（可自由选）
+   *   · 最快那行打「推荐」徽章 + 高亮
+   *   · 只写推荐，不写"不推荐"的说明
+   *   · 选择结果存 accelMode
+   * ══════════════════════════════════════════════════════════════ */
+
+  const PERF_MODES = [
+    { id: 'cpu', label: '仅 CPU', desc: '只用处理器' },
+    { id: 'gpu', label: '仅 GPU', desc: '只用显卡' },
+    { id: 'auto', label: 'CPU + GPU 并行', desc: '处理器与显卡同时转' },
+  ]
+
+  let perfRunning = false
+  let perfResult = null
+
+  function perfEl(id) { return document.getElementById(id) }
+
+  /**
+   * 打开性能测试弹窗。
+   *
+   * @param {object} opts
+   *   opts.force = true  → 强制模式：禁用 × 关闭、禁用点遮罩关闭
+   *                        （2026-10-26 用户要求：性能测试绑死在转码第一步，不允许跳过）
+   *
+   * 用户原话：
+   *   「把这个性能测试流程绑死在转码第一步，不允许用户跳过，
+   *    不然会与我们的'硬件加速功能'不符，相当于说谎造假！」
+   */
+  let perfForceMode = false
+
+  function openPerfModal(opts) {
+    const mask = perfEl('mask-perf')
+    if (!mask) return
+
+    perfForceMode = Boolean(opts && opts.force)
+    mask.hidden = false
+
+    // 强制模式下藏掉关闭按钮，并让遮罩不响应点击
+    const closeBtn = perfEl('perf-close')
+    if (closeBtn) closeBtn.style.display = perfForceMode ? 'none' : ''
+    mask.style.pointerEvents = 'auto'
+    const modal = mask.querySelector('.modal')
+    if (modal) modal.style.cursor = 'default'
+
+    const tip = perfEl('perf-force-tip')
+    if (tip) tip.hidden = !perfForceMode
+
+    runPerfBench()
+  }
+
+  function closePerfModal(force) {
+    // 强制模式（转码第一步）下，只有真正应用了模式才允许关闭
+    if (perfForceMode && force !== true) return
+    const mask = perfEl('mask-perf')
+    if (!mask) return
+    mask.hidden = true
+    perfForceMode = false
+    const closeBtn = perfEl('perf-close')
+    if (closeBtn) closeBtn.style.display = ''
+    const tip = perfEl('perf-force-tip')
+    if (tip) tip.hidden = true
+  }
+
+  /** 跑一次基准，并把结果画出来 */
+  async function runPerfBench() {
+    if (perfRunning) return
+    perfRunning = true
+
+    const state = perfEl('perf-state')
+    const table = perfEl('perf-table')
+    const note = perfEl('perf-note')
+    const applyBtn = perfEl('perf-apply')
+    const rows = perfEl('perf-rows')
+
+    if (state) state.hidden = false
+    if (table) table.hidden = true
+    if (note) note.hidden = true
+    if (applyBtn) applyBtn.disabled = true
+    if (rows) rows.innerHTML = ''
+    if (state) state.textContent = '准备中…'
+
+    let offEvent = null
+    try {
+      if (window.studyBuddy && window.studyBuddy.perf && window.studyBuddy.perf.onEvent) {
+        offEvent = window.studyBuddy.perf.onEvent((ev) => {
+          if (ev && ev.kind === 'stage' && state && state.hidden === false) {
+            state.textContent = ev.text || '测试中…'
+          }
+        })
+      }
+
+      const r = await window.studyBuddy.perf.bench({})
+      perfResult = r || { ok: false, err: '无返回' }
+
+      if (!perfResult.ok) {
+        if (state) {
+          state.hidden = false
+          state.textContent = '测试失败：' + (perfResult.err || '原因未知')
+        }
+        return
+      }
+
+      renderPerfResult(perfResult)
+    } catch (e) {
+      if (state) {
+        state.hidden = false
+        state.textContent = '测试失败：' + String((e && e.message) || e)
+      }
+    } finally {
+      perfRunning = false
+      try { offEvent && offEvent() } catch { /* ignore */ }
+    }
+  }
+
+  /** 画结果表：三行 radio + 最快那行标「推荐」 */
+  function renderPerfResult(r) {
+    const state = perfEl('perf-state')
+    const table = perfEl('perf-table')
+    const rows = perfEl('perf-rows')
+    const note = perfEl('perf-note')
+    const applyBtn = perfEl('perf-apply')
+    if (!rows || !table) return
+
+    if (state) state.hidden = true
+    table.hidden = false
+    rows.innerHTML = ''
+
+    const modes = (r.modes || []).slice()
+    const byId = {}
+    for (const m of modes) byId[m.id] = m
+
+    // 推荐 = 最快（后端已算好），把 'gpu' 映射到我们的 auto/gpu/cpu 语义
+    const recId = r.recommend === 'parallel' ? 'auto' : (r.recommend || '')
+
+    // 当前保存的模式（默认 auto）
+    let current = 'auto'
+    try {
+      const s = state && state.settings
+      if (s && s.accelMode) current = String(s.accelMode)
+    } catch { /* ignore */ }
+    if (!byId[current === 'auto' ? 'parallel' : current]) {
+      // 当前模式没测到，退回推荐值
+    }
+
+    for (const meta of PERF_MODES) {
+      const key = meta.id === 'auto' ? 'parallel' : meta.id
+      const m = byId[key]
+      const tr = document.createElement('tr')
+      if (meta.id === recId) tr.className = 'pick'
+
+      // 模式名 + radio
+      const td1 = document.createElement('td')
+      const lab = document.createElement('label')
+      lab.className = 'perf-radio'
+      const radio = document.createElement('input')
+      radio.type = 'radio'
+      radio.name = 'perfmode'
+      radio.value = meta.id
+      radio.checked = (meta.id === current) || (!current && meta.id === recId)
+      radio.addEventListener('change', () => {
+        if (applyBtn) applyBtn.disabled = false
+      })
+      lab.appendChild(radio)
+      const nameSpan = document.createElement('span')
+      nameSpan.textContent = meta.label
+      if (meta.id === recId) {
+        const b = document.createElement('span')
+        b.className = 'perf-badge'
+        b.textContent = '推荐'
+        nameSpan.appendChild(b)
+      }
+      lab.appendChild(nameSpan)
+      td1.appendChild(lab)
+      tr.appendChild(td1)
+
+      // 耗时
+      const td2 = document.createElement('td')
+      if (m && m.ok) {
+        td2.textContent = m.wall.toFixed(1) + 's'
+        if (meta.id === recId) td2.className = 'perf-fast'
+      } else {
+        td2.textContent = '—'
+        td2.title = (m && m.err) || '未测到'
+      }
+      tr.appendChild(td2)
+
+      // 实时率
+      const td3 = document.createElement('td')
+      td3.textContent = m && m.ok && m.rtf ? m.rtf.toFixed(3) : '—'
+      tr.appendChild(td3)
+
+      // 说明
+      const td4 = document.createElement('td')
+      td4.style.color = '#8b9199'
+      td4.style.fontSize = '12px'
+      td4.textContent = meta.desc
+      tr.appendChild(td4)
+
+      rows.appendChild(tr)
+    }
+
+    // 推荐提示（只写推荐，不写"不推荐"的说明）
+    if (note && recId) {
+      note.hidden = false
+      const recMeta = PERF_MODES.find((x) => x.id === recId)
+      const recMode = byId[recId === 'auto' ? 'parallel' : recId]
+      let txt = '测试结果：' + (recMeta ? recMeta.label : recId) + ' 最快'
+      if (recMode && recMode.ok) txt += '（' + recMode.wall.toFixed(1) + 's）'
+      if (r.gainVsSecond > 0) txt += '，比次快的省 ' + r.gainVsSecond.toFixed(1) + 's'
+      txt += '。可以选择它，也可以自行选其他模式。'
+      note.textContent = txt
+    }
+
+    if (applyBtn) applyBtn.disabled = false
+    // 选好推荐值，方便直接应用
+    try {
+      const pick = rows.querySelector('input[value="' + recId + '"]')
+      if (pick && !rows.querySelector('input:checked')) pick.checked = true
+    } catch { /* ignore */ }
+  }
+
+  /** 应用所选模式并保存 */
+  /**
+   * 应用所选模式，并把**完整的测试结果**存进设置（只保留最近一次）
+   *
+   * 用户原话：
+   *   「性能测试结果要保留，只保留最近一次的测试结果，
+   *    用户测试完一次之后后期再次使用应用，应用直接调用以往的测试结果
+   *    和用户的选择就不用再次测试了」
+   */
+  async function applyPerfMode() {
+    const rows = perfEl('perf-rows')
+    const picked = rows && rows.querySelector('input[name="perfmode"]:checked')
+    if (!picked) {
+      const st = perfEl('perf-state')
+      if (st) {
+        st.hidden = false
+        st.textContent = '请先选一个模式'
+      }
+      return false
+    }
+    const mode = picked.value
+
+    // 组装要保存的结果（只保留最近一次，整体覆盖）
+    const payload = {
+      accelMode: mode,
+      result: perfResult || { dur: 0, modes: [], recommend: '', gainVsSecond: 0, note: '' },
+    }
+
+    try {
+      const r = await window.studyBuddy.perf.saveResult(payload)
+      if (!r || r.ok === false) throw new Error((r && r.err) || '保存失败')
+
+      try {
+        state.settings = Object.assign({}, state.settings || {}, {
+          accelMode: mode,
+          perfTestedAt: r.perfTestedAt || Date.now(),
+          perfResult: payload.result,
+        })
+      } catch { /* ignore */ }
+
+      /* ★ 2026-10-26 修复：改用统一的 syncAccelUI 重绘，而不是只改一个 radio。
+       *   用户报「弹窗里选了仅显卡，回设置页还是勾着自动」——
+       *   原来只设了 rd.checked = true，没走统一入口，
+       *   而且 saveSettings 读的是 radio 当前 checked，容易把旧值写回磁盘。 */
+      try {
+        const st2 = state && state.settings ? state.settings : { accelMode: mode }
+        st2.accelMode = mode
+        syncAccelUI(st2)
+      } catch { /* ignore */ }
+      // 兜底：确保目标 radio 一定被勾选（syncAccelUI 万一抛错也生效）
+      try {
+        const rd = document.querySelector('input[name="accelmode"][value="' + mode + '"]')
+        if (rd && !rd.checked) rd.checked = true
+      } catch { /* ignore */ }
+
+      closePerfModal()
+      /* 2026-10-26：保存后立刻刷新按钮状态与表格 */
+      try { await refreshPerfStatus() } catch { /* ignore */ }
+      return true
+    } catch (e) {
+      const st = perfEl('perf-state')
+      if (st) {
+        st.hidden = false
+        st.textContent = '保存失败：' + String((e && e.message) || e)
+      }
+      return false
+    }
+  }
+
+  /**
+ * 扩展强制性能测试时，应用端也要弹出提示（2026-10-26 用户要求）
+ *
+ * 用户原话：「扩展端强行进行性能测试应用端怎么没有弹窗提示正在进行性能测试」
+ *
+ * 原来 perfRunnerImpl.run() 在主进程闷头跑，渲染层完全不知道。
+ * 现在监听 perf:event，在对话框里插一张进度卡，让用户看到「正在测」。
+ */
+let _perfNotifyCard = null
+/* 本轮测试是否已收口（done/failed 只写一次，防止重复提示） */
+let _perfTurnDone = false
+
+function mountPerfNotifier() {
+  try {
+    if (!window.studyBuddy || !window.studyBuddy.perf || !window.studyBuddy.perf.onEvent) return
+    window.studyBuddy.perf.onEvent((ev) => {
+      try {
+        const kind = String((ev && ev.kind) || '')
+        if (!kind) return
+
+        /* 复用一张卡片，避免刷屏。
+         * ★ 条件必须同时判断「引用为空」和「已脱离 DOM」——
+         *   只判 !_perfNotifyCard 会在 done 置 null 后新建第二张（原 bug）。 */
+        if (!_perfNotifyCard || !_perfNotifyCard.isConnected || !_perfNotifyCard.parentNode) {
+          const holder = el('div', 'msg assistant')
+          const who = el('div', 'who')
+          who.appendChild(el('span', null, '⚡ 性能测试'))
+          holder.appendChild(who)
+          const bubble = el('div', 'bubble', '')
+          holder.appendChild(bubble)
+          try {
+            const h = document.getElementById('hero')
+            if (h) h.hidden = true
+            const th = document.getElementById('thread')
+            if (th) th.appendChild(holder)
+            scrollToBottom()
+          } catch { /* ignore */ }
+          _perfNotifyCard = bubble
+        }
+
+        const b = _perfNotifyCard
+
+        /* ★ 2026-10-26 修复「提示发两遍」：
+         *   原来 done / failed 里写了 _perfNotifyCard = null ——
+         *   只是丢引用，卡片还在 DOM 里！
+         *   下一次任何事件都会因为 !_perfNotifyCard 而新建第二张卡。
+         *   现在：保留引用，同一轮里 done 只写一次。 */
+        if (kind === 'start') {
+          _perfTurnDone = false
+          b.textContent = '由浏览器扩展触发，正在准备测试音频…'
+        } else if (kind === 'stage') {
+          b.textContent = String(ev.text || '正在测试…')
+        } else if (kind === 'done') {
+          if (_perfTurnDone) return          // 本轮已收口，重复的 done 直接忽略
+          _perfTurnDone = true
+          const m = String(ev.accelMode || '')
+          const label = m === 'gpu' ? '仅 GPU' : (m === 'cpu' ? '仅 CPU' : 'CPU+GPU 并行')
+          b.textContent = '测试完成 · 已自动选用「' + label + '」。可在设置页随时更改。'
+          /* 2026-10-26：扩展测完也要刷新设置页的按钮与表格 */
+          try { refreshPerfStatus() } catch { /* ignore */ }
+        } else if (kind === 'failed') {
+          if (_perfTurnDone) return
+          _perfTurnDone = true
+          b.textContent = '测试失败：' + String(ev.text || '原因未知')
+        }
+      } catch { /* ignore */ }
+    })
+  } catch { /* ignore */ }
+}
+
+/* ══════════════════════════════════════════════════════════════
+ * 性能测试结果表格 + 按钮状态（2026-10-26 用户要求）
+ *
+ * 用户原话：
+ *   「性能测试设置成如果用户没做过按钮变亮可点击，
+ *    测试过（扩展/用户手动测试）就变灰禁止点击，
+ *    并在下方"检测到 NVIDIA GeForce RTX 5060 Ti，GPU 加速可用"
+ *    依次往下堆叠提示字幕，说明当前测试结果」
+ *   「固定素材测试（做成表格，此行合并居中）
+ *    CPU    Ryzen 5 5600           用时xx秒
+ *    GPU    NVIDIA GeForce RTX 5060 Ti  用时xx秒
+ *    硬件加速  CPU+GPU              用时xx秒
+ *    tips   测试结果仅作参考，若出现[硬件加速]数据弱于单通道处理结果属正常现象，
+ *           因转码程序在启动时会占用2-3秒，若其一方弱于另一方则会出现"拖后腿"表现属正常现象
+ *           （此内容合并两单元格，自动换行）」
+ * ══════════════════════════════════════════════════════════════ */
+
+/** 渲染结果表格 + 同步按钮禁用状态 */
+function renderPerfResultTable(result) {
+  const wrap = document.getElementById('perf-result-wrap')
+  const body = document.getElementById('perf-result-body')
+  if (!wrap || !body) return
+
+  if (!result || !Array.isArray(result.modes) || result.modes.length === 0) {
+    wrap.hidden = true
+    body.innerHTML = ''
+    return
+  }
+
+  wrap.hidden = false
+  body.innerHTML = ''
+
+  // 机型名（CPU / GPU 型号）
+  const cpuName = String(result.cpuName || '本机 CPU')
+  const gpuName = String(result.gpuName || '本机显卡')
+
+  // 最快的那一项（用于高亮）
+  const okList = result.modes.filter((m) => m && m.ok)
+  let fastest = null
+  if (okList.length) {
+    fastest = okList.reduce((x, y) => (Number(x.wall) <= Number(y.wall) ? x : y))
+  }
+
+  const ROWS = [
+    { key: 'cpu', label: 'CPU', model: cpuName },
+    { key: 'gpu', label: 'GPU', model: gpuName },
+    { key: 'parallel', label: '硬件加速', model: 'CPU+GPU' },
+  ]
+
+  for (const r of ROWS) {
+    const m = result.modes.find((x) => String(x.id) === r.key) || null
+    const tr = document.createElement('tr')
+    if (fastest && m && String(m.id) === String(fastest.id)) tr.className = 'perf-win'
+
+    const td1 = document.createElement('td')
+    td1.textContent = r.label
+    td1.style.width = '76px'
+    td1.style.whiteSpace = 'nowrap'
+    tr.appendChild(td1)
+
+    const td2 = document.createElement('td')
+    td2.textContent = r.model
+    tr.appendChild(td2)
+
+    const td3 = document.createElement('td')
+    td3.className = 'perf-sec'
+    if (m && m.ok) {
+      td3.textContent = '用时 ' + Number(m.wall || 0).toFixed(1) + ' 秒'
+    } else {
+      td3.textContent = '—'
+      td3.title = (m && m.err) || '未测到'
+    }
+    tr.appendChild(td3)
+
+    body.appendChild(tr)
+  }
+
+  // tips 行：合并两格（标签列 + 内容列），自动换行
+  const tipTr = document.createElement('tr')
+  const tipTd1 = document.createElement('td')
+  tipTd1.textContent = 'tips'
+  tipTd1.style.width = '76px'
+  tipTd1.style.whiteSpace = 'nowrap'
+  tipTd1.style.verticalAlign = 'top'
+  tipTr.appendChild(tipTd1)
+
+  const tipTd2 = document.createElement('td')
+  tipTd2.className = 'perf-tips'
+  // 左边界：前一行有两个单元格（型号 + 用时），所以 colspan=2
+  tipTd2.colSpan = 2
+  tipTd2.textContent = '测试结果仅作参考，若出现[硬件加速]数据弱于单通道处理结果属正常现象，'
+    + '因转码程序在启动时会占用 2-3 秒，若其一方弱于另一方则会出现「拖后腿」表现属正常现象。'
+  tipTr.appendChild(tipTd2)
+  body.appendChild(tipTr)
+}
+
+/** 同步「性能测试」按钮状态：没测过 → 亮起；测过 → 变灰禁用 */
+function syncPerfTestBtn(hasResult) {
+  const btn = document.getElementById('btn-perf-test')
+  if (!btn) return
+  if (hasResult) {
+    /* 用户要求：「测试过（扩展/用户手动测试）就变灰禁止点击」。
+     * 但完全锁死会让用户无法重测（比如换了显卡/装了组件）。
+     * 折中：按钮变灰禁用，同时在下方表格旁挂一个「重新测试」链接。 */
+    btn.disabled = true
+    btn.textContent = '✅ 已测试'
+    btn.title = '已测试过；如需重测，请点下方表格旁的「重新测试」'
+    const wrap = document.getElementById('perf-result-wrap')
+    if (wrap && !document.getElementById('perf-retest-link')) {
+      const link = document.createElement('div')
+      link.id = 'perf-retest-link'
+      link.style.cssText = 'margin-top:6px'
+      const b = document.createElement('button')
+      b.className = 'btn'
+      b.style.cssText = 'font-size:12px;padding:3px 10px'
+      b.textContent = '🔄 重新测试'
+      b.title = '硬件变动或想重新测一次时点这里'
+      b.onclick = () => { try { openPerfModal({ force: false }) } catch { /* ignore */ } }
+      link.appendChild(b)
+      wrap.appendChild(link)
+    }
+  } else {
+    const link = document.getElementById('perf-retest-link')
+    if (link) link.remove()
+    btn.disabled = false
+    btn.textContent = '⚡ 性能测试'
+    btn.title = '点我开始性能测试，测完会推荐最合适的模式'
+  }
+}
+
+/** 从设置里读结果并渲染（供 boot 与保存后调用） */
+async function refreshPerfStatus() {
+  try {
+    const st = await window.studyBuddy.perf.needTest()
+    const has = Boolean(st && st.ok && st.needTest === false)
+    syncPerfTestBtn(has)
+    if (has && st.result) {
+      /* 机器名由主进程实时取（可能刚装 GPU 组件、或换了机器） */
+      const merged = Object.assign({}, st.result, {
+        cpuName: st.cpuName || st.result.cpuName || '',
+        gpuName: st.gpuName || st.result.gpuName || '',
+      })
+      renderPerfResultTable(merged)
+    } else {
+      renderPerfResultTable(null)
+    }
+  } catch { /* ignore */ }
+}
+
+function mountPerfBench() {
+    const closeBtn = perfEl('perf-close')
+    const rerun = perfEl('perf-rerun')
+    const applyBtn = perfEl('perf-apply')
+    const mask = perfEl('mask-perf')
+    if (closeBtn) closeBtn.onclick = () => closePerfModal()
+    if (rerun) rerun.onclick = () => runPerfBench()
+    if (applyBtn) applyBtn.onclick = () => applyPerfMode()
+    if (mask) {
+      mask.addEventListener('click', (e) => {
+        if (e.target !== mask) return
+        // 强制模式下点遮罩无效（性能测试不允许跳过）
+        if (perfForceMode) return
+        closePerfModal()
+      })
+    }
+  
+    // 设置页「性能测试」按钮（2026-10-26）
+    const setupBtn = perfEl('btn-perf-test')
+    if (setupBtn) setupBtn.onclick = () => openPerfModal()
+
+    /* ★ 2026-10-26：把「哪个控件没找到」记下来，避免再次出现
+     *       「弹窗能开但按钮点不动」这种静默失败（DOM 未就绪时就是这个症状）。 */
+    try {
+      const missing = []
+      if (!closeBtn) missing.push('perf-close')
+      if (!rerun) missing.push('perf-rerun')
+      if (!applyBtn) missing.push('perf-apply')
+      if (!mask) missing.push('mask-perf')
+      if (!setupBtn) missing.push('btn-perf-test')
+      if (missing.length) console.warn('[perf] mountPerfBench 未找到:', missing.join(', '))
+    } catch { /* ignore */ }
+
+}
+
 
 /** 用当前输入框里的值真实请求一次模型接口，不落盘也不依赖已保存的配置 */
 async function testApi() {
@@ -1296,8 +1940,21 @@ function mountCaptureInThread() {
           const stage = String(ev.stage || '')
           const text = String(ev.text || '')
           if (!text) return
-          // 转写进度用固定 key，原地更新
-          if (stage === 'transcribe') line(text, 'info', 'transcribe')
+          /* ★ 2026-10-26：CPU / GPU 两条转写流必须各占一行。
+           *
+           * 原来所有 transcribe 行共用 key='transcribe' → 后到的覆盖先到的，
+           * 用户看到的就是「GPU 的进度一显示就被 CPU 顶下去」。
+           *
+           * transcribe.py 已在进度前加通道标识（CPU ｜ / GPU ｜），
+           * 这里按通道拆出独立 key，两路各自原地更新。 */
+          if (stage === 'transcribe') {
+            let key = 'transcribe'
+            let label = text
+            if (/^CPU\s*｜/.test(text)) { key = 'transcribe:cpu'; label = text }
+            else if (/^GPU\s*｜/.test(text)) { key = 'transcribe:gpu'; label = text }
+            else if (/^硬件加速｜/.test(text)) { key = 'transcribe:accel'; label = text }
+            line(label, 'info', key)
+          }
           else line(text, 'info', stage || null)
         } else if (t === 'done') {
           /* ★ 2026-10-25：原来 reused 写死 false，导致「复用已有日志」永远显示成「本次新抓取」。
@@ -1324,7 +1981,31 @@ function mountCaptureInThread() {
 
 
 async function boot() {
+  try { mountPerfBench() } catch { /* ignore */ }
+  /* ★ 2026-10-26 事故修复：性能测试状态改为「延后后台刷新」，绝不 await。
+   *   原先是 `await refreshPerfStatus()` 放在 boot 第二句，
+   *   主进程里 getMachineNames 用 execFileSync('nvidia-smi') 卡住 →
+   *   这个 await 永不返回 → 后面的 refreshChats() 永远执行不到
+   *   → **用户看到：应用卡住 + 聊天记录全没了**。
+   *   现在：3 秒后后台跑，失败也不影响任何主流程。 */
+  setTimeout(() => {
+    try { refreshPerfStatus() } catch { /* ignore */ }
+  }, 3000)
+  /* ★ 2026-10-26 修复：扩展触发的性能测试事件必须在启动时就订阅。
+   *   原来这句被误插进 mountPerfBench 内部，只有打开弹窗才注册，
+   *   而扩展命令触发时不会打开弹窗 → 应用端永远收不到 perf:event。 */
+  try { mountPerfNotifier() } catch { /* ignore */ }
   bind()
+  /* ★ 2026-10-26：聊天记录提到最前面加载（用户最关心），
+   *   不要让它排在后面被任何 await 拖住。 */
+  try {
+    await refreshChats()
+    if (state.chats.length) {
+      openChat(state.chats[0].id)
+    } else {
+      renderThread()
+    }
+  } catch { /* ignore */ }
   /* ★ 2026-10-25：抓取进度改为在对话区以「智能体消息」呈现
    *   （用户明确要求：不要右侧独立浮动卡片）。
    *   旧函数 mountAutoCaptureProgress 已停用（保留代码但不再调用，
@@ -1334,19 +2015,209 @@ async function boot() {
   try { mountDiskUsage() } catch { /* ignore */ }
   try { setSideCollapsed(localStorage.getItem(SIDE_KEY) === '1', false) } catch { setSideCollapsed(false, false) }
   try { state.settings = await api.settings.load() } catch { state.settings = null }
-  await refreshChats()
-  await refreshCourseOptions()
-  if (state.chats.length) {
-    openChat(state.chats[0].id)
-  } else {
-    renderThread()
-  }
+  /* 聊天记录已在上面加载过，这里只补课程列表 */
+  try { await refreshCourseOptions() } catch { /* ignore */ }
   autoGrow()
 }
 
 /** 磁盘占用统计（2026-10-25 新增） */
+/* ══════════════════════════════════════════════════════════════
+ * 磁盘占用树状统计表（2026-10-26 用户要求）
+ *
+ * 用户原话：「设置的[磁盘占用]做成树状统计表展示出来
+ *            不然一条条按排状展示不好看」
+ *
+ * 改前是一行文字用「　·　」拼接：
+ *   程序目录 4.29 GB　　app 1.2 GB　·　tools 2.3 GB　·　...
+ * 改后是三层树：
+ *   程序目录                     4.29 GB   ██████████
+ *     ├ tools                    2.34 GB   ██████░
+ *     │   ├ models               1.51 GB   ████░
+ *     │   └ pyenv                278 MB    █░
+ *     ├ app                      1.20 GB   ███░
+ *     └ cache                    165 MB    █░
+ * ══════════════════════════════════════════════════════════════ */
+
+/** 造一行表格 */
+function diskRow(opts) {
+  const { name, size, files, pct, level, isDir, bold, isSum, isLast } = opts
+  const tr = document.createElement('tr')
+  if (isSum) tr.className = 'disk-sum'
+
+  /* ① 名称列（带缩进 + 图标） */
+  const td1 = document.createElement('td')
+  td1.className = 't-name lv' + (level || 0)
+  const ico = document.createElement('span')
+  ico.className = 'ico'
+  /* 树形连线：中间项 ├、最后一项 └、根无标记 */
+  ico.textContent = level === 0 ? '' : (isLast ? '└' : '├')
+  td1.appendChild(ico)
+  const nm = document.createElement('span')
+  nm.className = isDir ? 'tdir' : 'tfile'
+  nm.textContent = name
+  /* 名字太长会被 ellipsis 截断，用 title 让用户悬停能看到全名 */
+  nm.title = name
+  td1.appendChild(nm)
+  tr.appendChild(td1)
+
+  /* ② 大小列 */
+  const td2 = document.createElement('td')
+  td2.className = 't-size'
+  td2.textContent = size || '—'
+  tr.appendChild(td2)
+
+  /* ③ 文件数列 */
+  const td3 = document.createElement('td')
+  td3.className = 't-files'
+  td3.textContent = files ? String(files) : ''
+  tr.appendChild(td3)
+
+  /* ④ 占比条 */
+  const td4 = document.createElement('td')
+  td4.className = 't-bar'
+  const wrap = document.createElement('div')
+  wrap.className = 'disk-bar-wrap'
+  const bar = document.createElement('div')
+  bar.className = 'disk-bar'
+  const fill = document.createElement('i')
+  /* 小于 0.5% 也给一点可见宽度，否则完全看不见 */
+  const w = Math.max(0.5, Math.min(100, Number(pct) || 0))
+  fill.style.width = w + '%'
+  bar.appendChild(fill)
+  wrap.appendChild(bar)
+  const pctEl = document.createElement('span')
+  pctEl.className = 'disk-bar-pct'
+  pctEl.textContent = (Number(pct) || 0).toFixed(1) + '%'
+  wrap.appendChild(pctEl)
+  td4.appendChild(wrap)
+  tr.appendChild(td4)
+
+  return tr
+}
+
+/** 渲染整棵树 */
+function renderDiskTree(host, d) {
+  if (!host) return
+  host.innerHTML = ''
+  if (!d || !Array.isArray(d.parts)) return
+
+  const table = document.createElement('table')
+  table.className = 'disk-tree-table'
+
+  /* 表头 */
+  const thead = document.createElement('thead')
+  const hr = document.createElement('tr')
+  for (const [txt, cls] of [['目录 / 文件', 't-name'], ['大小', 't-size'], ['文件数', 't-files'], ['占比', 't-bar']]) {
+    const th = document.createElement('th')
+    if (cls) th.className = cls
+    th.textContent = txt
+    hr.appendChild(th)
+  }
+  thead.appendChild(hr)
+  table.appendChild(thead)
+
+  const tbody = document.createElement('tbody')
+
+  /* 根节点（rootTotal 缺失时兜底，避免空数据崩溃） */
+  const rt = d.rootTotal || { bytes: 0, text: '0 B', files: 0 }
+  tbody.appendChild(diskRow({
+    name: '程序目录',
+    size: rt.text || '0 B',
+    files: rt.files || '',
+    pct: 100,
+    level: 0,
+    isDir: true,
+    bold: true,
+  }))
+
+  /* 一级 + 二级
+   * 树形连线规则（2026-10-26 修正）：**同组内最后一个用 └ 收尾**
+   *   · 一级项：它是整个列表的最后一个 → └，否则 ├
+   *   · 二级项：它是所属父项的最后一个子项 → └，否则 ├ */
+  const parts = d.parts || []
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i]
+    const kids = p.children || []
+    tbody.appendChild(diskRow({
+      name: p.name,
+      size: p.text,
+      files: p.files || '',
+      pct: p.pct,
+      level: 1,
+      isDir: true,
+      isLast: i === parts.length - 1,
+    }))
+    for (let j = 0; j < kids.length; j++) {
+      const ch = kids[j]
+      tbody.appendChild(diskRow({
+        name: ch.name,
+        size: ch.text,
+        files: ch.files || '',
+        pct: ch.pct,
+        level: 2,
+        isDir: true,
+        isLast: j === kids.length - 1,
+      }))
+    }
+  }
+
+  table.appendChild(tbody)
+  host.appendChild(table)
+}
+
+/** 渲染 C 盘残留（结构不同：可能为空） */
+function renderCDrive(host, d) {
+  if (!host) return
+  host.innerHTML = ''
+  if (!d) return
+
+  if (!d.cdrive || !d.cdrive.length) {
+    const ok = document.createElement('div')
+    ok.className = 'disk-sec-title'
+    ok.textContent = '✅ C 盘没有本应用的残留'
+    host.appendChild(ok)
+    return
+  }
+
+  const title = document.createElement('div')
+  title.className = 'disk-sec-title'
+  title.textContent = '⚠️ C 盘残留 ' + d.cdriveTotal.text
+  host.appendChild(title)
+
+  const table = document.createElement('table')
+  table.className = 'disk-tree-table'
+  const thead = document.createElement('thead')
+  const hr = document.createElement('tr')
+  for (const [txt, cls] of [['位置', 't-name'], ['大小', 't-size'], ['文件数', 't-files'], ['占比', 't-bar']]) {
+    const th = document.createElement('th')
+    if (cls) th.className = cls
+    th.textContent = txt
+    hr.appendChild(th)
+  }
+  thead.appendChild(hr)
+  table.appendChild(thead)
+
+  const tbody = document.createElement('tbody')
+  const cd = d.cdrive || []
+  for (let i = 0; i < cd.length; i++) {
+    const p = cd[i]
+    tbody.appendChild(diskRow({
+      name: p.name,
+      size: p.text,
+      files: p.files || '',
+      pct: p.pct,
+      level: 1,
+      isDir: true,
+      isLast: i === cd.length - 1,
+    }))
+  }
+  table.appendChild(tbody)
+  host.appendChild(table)
+}
+
 async function mountDiskUsage() {
   const progBox = document.getElementById('disk-prog')
+  const treeBox = document.getElementById('disk-tree')
   const cBox = document.getElementById('disk-c')
   const logBox = document.getElementById('disk-clean-log')
   if (!progBox) return
@@ -1356,20 +2227,12 @@ async function mountDiskUsage() {
     if (cBox) cBox.textContent = ''
     try {
       const d = await window.studyBuddy.disk.usage()
-      // 程序目录
-      const lines = d.parts.map((p) => `${p.name} <b>${p.text}</b>`).join('　·　')
-      progBox.innerHTML = `程序目录 <b>${d.rootTotal.text}</b>　　${lines}`
-
-      // C 盘
-      if (cBox) {
-        if (!d.cdrive.length) {
-          cBox.innerHTML = '✅ <b>C 盘没有本应用的残留</b>'
-        } else {
-          const cl = d.cdrive.map((p) => `${p.name} <b>${p.text}</b>`).join('　·　')
-          cBox.innerHTML = `⚠️ C 盘残留 <b>${d.cdriveTotal.text}</b>　　${cl}`
-        }
-      }
+      progBox.textContent = ''
+      progBox.hidden = true
+      renderDiskTree(treeBox, d)
+      renderCDrive(cBox, d)
     } catch (e) {
+      progBox.hidden = false
       progBox.textContent = '统计失败：' + (e && e.message ? e.message : e)
     }
   }
@@ -1408,32 +2271,59 @@ async function mountDiskUsage() {
 }
 
 
-boot()
+/* ★ 2026-10-26 修复：boot() 必须在 DOM 就绪后再跑。
+ *
+ * 根因：index.html 里 <script src="app.js"> 出现在 #mask-perf 之前，
+ *       app.js 同步执行时那批弹窗 DOM 还没被解析出来，
+ *       mountPerfBench() 里 perfEl('perf-apply') / perfEl('perf-rerun') 全是 null，
+ *       于是 if (applyBtn) / if (rerun) 的绑定全部跳过，
+ *       弹窗能打开（openPerfModal 是点击时才查 DOM），
+ *       但「重新测试」「应用所选模式」点了没反应。
+ */
+if (document.readyState === 'loading') {
+  document.addEventListener('DOMContentLoaded', () => {
+    boot().catch((e) => { try { console.error('[boot]', e) } catch { /* ignore */ } })
+  })
+} else {
+  boot().catch((e) => { try { console.error('[boot]', e) } catch { /* ignore */ } })
+}
 
 
 /** 硬件加速 UI 同步（2026-10-25 新增） */
+/**
+ * 硬件加速区统一重绘（2026-10-26 合并后只剩三选一）
+ *
+ * 用户原话：「设置里的硬件加速的单独一个框就没用了啊，
+ *            因为选择自动、仅cpu、仅GPU已经是在设置硬件加速了」
+ *
+ * 合并前是「复选框 + 三选一」两套开关控制同一行为，而且：
+ *   · capture.js 里 hardwareAccel=false 与 accelMode='cpu' 完全等价（都是强制 CPU）
+ *   · 取消勾选还会把三选一整块隐藏，值却留在原状态 → 用户看不见也改不了
+ *
+ * 现在只按 accelMode 重绘，显式互斥，非法值回落 auto。
+ */
 function syncAccelUI(s) {
-  const cb = document.getElementById('set-hwaccel')
-  const wrap = document.getElementById('set-accel-wrap')
-  const hint = document.getElementById('set-accel-hint')
-  if (!cb) return
-  const on = !(s && s.hardwareAccel === false)
-  cb.checked = on
   const mode = (s && s.accelMode) || 'auto'
   const radios = document.querySelectorAll('input[name="accelmode"]')
-  radios.forEach((r) => { r.checked = (r.value === mode) })
-  if (wrap) wrap.style.display = on ? '' : 'none'
-  if (hint) {
-    hint.textContent = on
-      ? (mode === 'cpu' ? '将只使用 CPU，速度较慢但更稳定。' : '')
-      : '已关闭硬件加速，将只使用 CPU。'
+
+  /* 显式互斥：匹配的勾上，其余显式取消（不依赖浏览器同名 radio 的自动互斥） */
+  let hit = false
+  radios.forEach((r) => {
+    if (r.value === mode) { r.checked = true; hit = true }
+    else r.checked = false
+  })
+  if (!hit && radios.length) {
+    // state 里的值不在选项里（旧配置残留）→ 回落到 auto
+    radios.forEach((r) => { r.checked = (r.value === 'auto') })
   }
-  if (!bindHardwareAccel.done) {
-    bindHardwareAccel.done = true
-    cb.addEventListener('change', () => {
-      if (wrap) wrap.style.display = cb.checked ? '' : 'none'
-      if (hint) hint.textContent = cb.checked ? '' : '已关闭硬件加速，将只使用 CPU。'
-    })
+
+  /* 提示文案：只描述当前模式，不再有「已关闭硬件加速」这种第四态 */
+  const hint = document.getElementById('set-accel-hint')
+  if (hint) {
+    const cur = hit ? mode : 'auto'
+    hint.textContent = cur === 'cpu'
+      ? '将只使用 CPU 转码，速度较慢但更稳定。'
+      : ''
   }
 }
 
@@ -1498,10 +2388,7 @@ function syncSpeedUI(s) {
   document.querySelectorAll('input[name="transspeed"]').forEach((r) => {
     r.checked = (r.value === speed)
   })
-  const par = document.getElementById('set-parallel')
-  if (par) par.checked = (s && s.hardwareParallel === true)
-
-  // 绑定一次
+    // 绑定一次
   if (!syncSpeedUI.bound) {
     syncSpeedUI.bound = true
     document.querySelectorAll('input[name="transspeed"]').forEach((r) => {
@@ -1523,8 +2410,7 @@ function syncSpeedUI(s) {
 /** 检测 GPU 状态，并给不可用的控件变灰 */
 async function checkGpuStatus(silent) {
   const hint = document.getElementById('set-gpu-hint')
-  const wrap = document.getElementById('set-parallel-wrap')
-  const btnI = document.getElementById('btn-install-gpu')
+    const btnI = document.getElementById('btn-install-gpu')
   try {
     const r = await window.studyBuddy.gpu.status()
     if (hint) {
@@ -1534,14 +2420,28 @@ async function checkGpuStatus(silent) {
 
     // ① 没有 N 卡 → 并行开关变灰、下载按钮变灰
     const noNv = !r.hasNvidia
-    if (wrap) {
-      wrap.classList.toggle('no-nvidia', noNv)
-      if (noNv) {
-        const cb = document.getElementById('set-parallel')
-        if (cb) cb.checked = false
+        if (btnI) btnI.disabled = noNv || r.dllOk
+
+    /* ★ 2026-10-26 合并后：无 N 卡时把「自动」「仅显卡」两个选项变灰禁用，
+     *   只留「仅 CPU」可选（用户要求：非 N 卡就把硬件加速禁用）。 */
+    try {
+      const wrapAuto = document.getElementById('accel-wrap-auto')
+      const wrapGpu = document.getElementById('accel-wrap-gpu')
+      for (const [el, name] of [[wrapAuto, 'accelmode-auto'], [wrapGpu, 'accelmode-gpu']]) {
+        if (!el) continue
+        el.classList.toggle('no-nvidia', noNv)
+        const inp = el.querySelector('input[name="accelmode"]')
+        if (inp) { inp.disabled = noNv; inp.dataset.nvDisabled = name }
       }
-    }
-    if (btnI) btnI.disabled = noNv || r.dllOk
+      /* 没有 N 卡而当前选的是 auto/gpu → 强制切到 cpu，避免留下无效配置 */
+      if (noNv) {
+        const cur = document.querySelector('input[name="accelmode"]:checked')
+        if (cur && cur.value !== 'cpu') {
+          const cpu = document.querySelector('input[name="accelmode"][value="cpu"]')
+          if (cpu) { cpu.checked = true }
+        }
+      }
+    } catch { /* ignore */ }
 
     // ② 有 N 卡但缺组件 → 提示下载
     if (r.hasNvidia && !r.dllOk) {

@@ -31,6 +31,7 @@
     // 确定性字体解码（2026-10-24）：漏了解构会导致 ReferenceError，整脚本崩掉
     buildFontCtx, decodeByFontMap, sbMd5,
     apiPost, apiGet, LOG, LS_SUBMITTED,
+    SB_APP_STATE, probeApp, forceReconnect, noteApiResult, isAppOnline, onAppStateChange,
   } = C
 
   /**
@@ -233,7 +234,7 @@
       if (quizState.active) {
         quizState.active = false
         quizState.busy = false
-        flash('✅ 弹题已通过，视频继续', 'ok')
+        flash('✅ 弹题通过 · 播放恢复', 'ok')
         diag.quizInfo = 'passed'
       }
       return false
@@ -247,16 +248,16 @@
       quizState.aiTried = false   // ← 每道新弹题都要重置，否则后续弹题永远不再尝试 AI
       quizState.passed = false
       diag.quizInfo = 'detected'
-      flash('📝 检测到视频弹题，开始自动作答', 'info')
+      flash('📝 弹题拦截 · 自动作答中', 'info')
     }
     if (Date.now() - quizState.startedAt > CFG.quizTimeoutMs) {
-      flash('⚠ 弹题处理超时，请手动处理', 'warn')
+      flash('⚠ 弹题超时 · 请手动处理', 'warn')
       quizState.active = false
       diag.quizInfo = 'timeout'
       return true
     }
     if (quizState.attempts >= CFG.maxQuizAttempts) {
-      flash(`⚠ 已尝试 ${CFG.maxQuizAttempts} 次，停止（请手动处理）`, 'warn')
+      flash(`⚠ 弹题 ${CFG.maxQuizAttempts} 次未通过 · 已停止`, 'warn')
       quizState.active = false
       diag.quizInfo = 'gaveup'
       return true
@@ -294,14 +295,14 @@
       try { target.input.checked = true } catch { /* ignore */ }
       try { target.input.dispatchEvent(new Event('change', { bubbles: true })) } catch { /* ignore */ }
     }
-    flash(`🖱 第 ${quizState.attempts} 次：选「${txt(target.node, 24) || '选项'}」`, 'info')
+    flash(`🖱 第 ${quizState.attempts} 次 · 选「${txt(target.node, 24) || '选项'}」`, 'info')
     await sleep(CFG.clickGapMs)
 
     const submit = findQuizSubmit(doc, mask)
     if (submit) {
       quizState.busy = true
       fireClick(submit, doc)
-      flash('📤 已提交，等待判分…', 'info')
+      flash('📤 已提交 · 等待判分', 'info')
       await sleep(CFG.submitWaitMs)
 
       // ⚠️ 关键：必须验证弹题**真的消失了**，不能只看点击动作有没有执行。
@@ -311,17 +312,17 @@
       if (stillThere) {
         diag.quizInfo = `attempt ${quizState.attempts} 未通过，换选项重试`
         LOG(`第 ${quizState.attempts} 次提交后弹题仍在，换选项`)
-        flash(`↻ 这次没答对，换一个选项（第 ${quizState.attempts + 1} 次）`, 'warn')
+        flash(`↻ 未通过 · 换选项重试（第 ${quizState.attempts + 1} 次）`, 'warn')
         // 不清空 tried，让下一轮自然选下一个没试过的
       } else {
         diag.quizInfo = `passed at attempt ${quizState.attempts}`
-        flash(`✅ 弹题已通过（第 ${quizState.attempts} 次答对）`, 'ok')
+        flash(`✅ 弹题通过 · 第 ${quizState.attempts} 次`, 'ok')
         quizState.active = false
         quizState.passed = true
       }
       quizState.busy = false
     } else {
-      flash('⚠ 弹题里没找到提交按钮，请手动点', 'warn')
+      flash('⚠ 未定位到提交按钮 · 请手动点击', 'warn')
     }
     return true
   }
@@ -356,7 +357,7 @@
         }
       }
       quizState.attempts++
-      flash(`🤖 用课程日志作答：${keys.join('')}`, 'info')
+      flash(`🤖 依据文字稿作答 · ${keys.join('')}`, 'info')
       await sleep(CFG.clickGapMs)
       const submit = findQuizSubmit(doc, mask)
       if (submit) {
@@ -369,11 +370,11 @@
         if (findQuizMask()) {
           diag.quizInfo = `AI 作答未通过（第 ${quizState.attempts} 次）`
           LOG('AI 作答后弹题仍在，交给试错逻辑')
-          flash('↻ AI 这次没答对，改用试错', 'warn')
+          flash('↻ 依据作答未通过 · 转试错', 'warn')
           return false   // 让上层继续走穷举
         }
         diag.quizInfo = `AI 作答通过`
-        flash('✅ 弹题已通过（AI 依据课程日志）', 'ok')
+        flash('✅ 弹题通过 · 依据文字稿', 'ok')
         quizState.active = false
         quizState.passed = true
       }
@@ -623,7 +624,7 @@
 
       for (const k of a.keys) {
         const o = q.rawOptions.find((x) => String(x.key) === String(k))
-        if (!o) { LOG('找不到选项', q.qid, k); continue }
+        if (!o) { LOG('选项未匹配', q.qid, k); continue }
         try {
           // 用 fireClick：里面会优先直接调 addChoice/addMultipleChoice，
           // 不会触发 <a href="javascript:"> 导致的 CSP 拦截
@@ -656,11 +657,11 @@
 
     // ① 切到「章节测验」附件
     if (!clickAttachByKeyword('测验')) {
-      flash('⚠ 这篇没有「章节测验」附件', 'warn')
+      flash('⚠ 未找到章节测验附件', 'warn')
       return {
         ok: false,
         reason: 'no-quiz-attach',
-        detail: `页面上找不到「章节测验」附件（当前附件=${currentAttachTitle() || '未知'}，页面 iframe=${document.querySelectorAll('iframe').length} 个）`,
+        detail: `未定位章节测验附件（当前=${currentAttachTitle() || '未知'}，iframe=${document.querySelectorAll('iframe').length} 个）`,
       }
     }
     // ② 等测验页就绪
@@ -677,7 +678,7 @@
     // ③ 已经是批阅页 → 说明做过了
     const url3 = String(d3.location.href || '')
     if (/selectWorkQuestionYiPiYue/.test(url3)) {
-      flash('ℹ 这章测验已完成，跳过', 'info')
+      flash('ℹ 测验已完成 · 跳过', 'info')
       return { ok: true, skipped: true, reason: 'already-done' }
     }
     const bodyText = d3.body ? String(d3.body.innerText || '') : ''
@@ -697,14 +698,14 @@
       if (pageSaysTodo) {
         // 本地记着已提交，但页面说还没做 → 以页面为准，清掉错误记录后继续
         LOG(`workId=${workId} 本地记为已提交，但页面显示待完成，清除记录并重做`)
-        flash('ℹ 页面显示这题还没做，重新作答', 'info')
+        flash('ℹ 平台显示未完成 · 重新作答', 'info')
         try {
           const s = submittedSet()
           s.delete(String(workId))
           localStorage.setItem(LS_SUBMITTED, JSON.stringify([...s]))
         } catch { /* ignore */ }
       } else {
-        flash('ℹ 这个测验已经提交过，不再重复提交', 'info')
+        flash('ℹ 已提交过 · 不重复提交', 'info')
         return { ok: true, skipped: true, reason: 'already-submitted' }
       }
     }
@@ -713,7 +714,7 @@
     const decodeCtx = buildDecodeCtx(d3)
     const questions = grabQuestions(d3, decodeCtx)
     if (!questions.length) {
-      flash('⚠ 没抓到题目，请检查页面', 'warn')
+      flash('⚠ 未解析到题目 · 请检查页面', 'warn')
 return {
         ok: false,
         reason: 'no-questions',
@@ -734,14 +735,14 @@ return {
     // ⑥ 解码失败检测（契约 0.4.3）
     const decodeFail = checkDecodeFail(questions, decodeCtx)
     if (decodeFail) {
-      flash(`⚠ ${decodeFail}，本题跳过（不带乱码作答）`, 'warn')
+      flash(`⚠ 文字还原失败 · 本题跳过`, 'warn')
       return { ok: false, reason: 'decode-failed', detail: decodeFail }
     }
 
     // ⑥.5 解码质量提醒（放行但有低置信字时提示用户，不影响作答）
     const dq = decodeCtx.decodeQuality
     if (dq && dq.warn) {
-      flash(`ℹ 本题有 ${dq.lowN}/${dq.obfTotal} 个低置信字，已交 AI 结合上下文判断`, 'info')
+      flash(`ℹ 低置信字 ${dq.lowN}/${dq.obfTotal} · 交由上下文判定`, 'info')
     }
 
     // ⑦ 请求应用作答
@@ -761,7 +762,7 @@ return {
     }
     const r = await apiPost('/ext/quizAnswer', payload, 120000)
     if (!r.body) {
-      flash('⚠ 应用无响应，请确认学习通学伴已打开', 'err')
+      flash('⚠ 应用无响应 · 请确认已启动', 'err')
 return {
         ok: false,
         reason: 'app-unreachable',
@@ -771,15 +772,15 @@ return {
     if (!r.body.ok) {
       const err = String(r.body.error || '')
       const msg = String(r.body.message || '')
-      if (err === 'no-course-log') flash('⚠ 这节课还没有课程日志，无法作答（请先在应用里抓一次）', 'warn')
-      else if (err === 'decode-failed') flash(`⚠ 题目文字无法还原：${msg || '原因未知'}，已跳过`, 'warn')
-      else if (err === 'parse-failed') flash('⚠ AI 返回格式异常，本次不提交', 'warn')
-      else flash(`⚠ 作答失败：${msg || err}`, 'warn')
+      if (err === 'no-course-log') flash('⚠ 无文字稿 · 请先在应用抓取', 'warn')
+      else if (err === 'decode-failed') flash(`⚠ 文字还原失败 · ${msg || '原因未知'}`, 'warn')
+      else if (err === 'parse-failed') flash('⚠ 返回格式异常 · 不提交', 'warn')
+      else flash(`⚠ 作答失败 · ${msg || err}`, 'warn')
       return { ok: false, reason: err || 'answer-failed', detail: msg }
     }
     const answers = r.body.answers || []
     if (!answers.length) {
-      flash('⚠ AI 没给出可用答案，本次不提交', 'warn')
+      flash('⚠ 无可用答案 · 不提交', 'warn')
 return {
         ok: false,
         reason: 'no-answers',
@@ -810,17 +811,17 @@ return {
     // ⑧ 勾选
     diag.phase = 'applying'
     const applied = await applyAnswers(d3, questions, answers)
-    flash(`✅ 已勾选 ${applied} 个选项，准备提交`, 'ok')
+    flash(`✅ 已勾选 ${applied} 项 · 准备提交`, 'ok')
     await sleep(700)
 
     // ⑨ 提交
     const btn = findSubmitBtn(d3)
     if (!btn) {
-      flash('⚠ 没找到提交按钮，请手动提交', 'warn')
+      flash('⚠ 未定位到提交按钮 · 请手动提交', 'warn')
 return {
         ok: false,
         reason: 'no-submit',
-        detail: '测验页里找不到「提交」按钮（可能页面结构变了，请手动提交）',
+        detail: '测验页未定位提交按钮（页面结构可能变更，请手动提交）',
       }
     }
     diag.phase = 'submitting'
@@ -843,7 +844,7 @@ return {
     } catch (e) {
       autoConfirm.restore()
       const em = (e && e.message) || String(e || '未知')
-      flash('⚠ 提交失败：' + em, 'warn')
+      flash('⚠ 提交失败 · ' + em, 'warn')
       return {
         ok: false,
         reason: 'submit-error',
@@ -858,16 +859,16 @@ return {
 
     // 返回值是对象 {ok, found, clicked, why}，区分三种情况
     if (confirmed.ok) {
-      flash('✅ 已点「确认提交」并生效', 'ok')
+      flash('✅ 确认提交 · 已生效', 'ok')
     } else if (confirmed.found && !confirmed.clicked) {
-      flash('⚠ 找到确认框但点不动，请手动提交', 'warn')
+      flash('⚠ 确认框不可点击 · 请手动提交', 'warn')
       diag.phase = 'submitted-stuck'
     } else if (confirmed.found && confirmed.clicked) {
-      flash('⚠ 点了确认但框没消失，请人工核对', 'warn')
+      flash('⚠ 确认框未关闭 · 请人工核对', 'warn')
       diag.phase = 'submitted-unconfirmed'
     } else {
       // 压根没检测到弹窗：可能是页面直接提交了，也可能弹窗还没出来
-      flash('ℹ 未检测到确认框（可能已直接提交），稍后核对结果', 'info')
+      flash('ℹ 无确认框 · 稍后核对结果', 'info')
       diag.phase = 'submitted-unconfirmed'
     }
 
@@ -887,7 +888,7 @@ return {
 
     // 若还停留在「确认提交?」说明确认没点成功，再试一次
     if (/确认提交|确定提交/.test(after)) {
-      flash('⚠ 确认框仍在，再试一次', 'warn')
+      flash('⚠ 确认框仍在 · 重试', 'warn')
       const again = await confirmSubmitDialog()
       if (again && again.ok) {
         await sleep(2500)
@@ -907,7 +908,7 @@ return {
       return { ok: true, submitted: true }
     }
     if (/确认提交/.test(after)) {
-      flash('❌ 提交未完成，确认框未能点掉，请手动提交', 'err')
+      flash('❌ 提交未完成 · 请手动处理', 'err')
 return {
         ok: false,
         reason: 'confirm-failed',
@@ -916,7 +917,7 @@ return {
     }
     // 既没看到完成、也没看到确认框：可能还在处理中，也可能真没交上。
     // 不记账，让下一轮还能重试（避免「假成功」把章节永久跳过）。
-    flash('⚠ 提交结果未能确认，下次会再试一次', 'warn')
+    flash('⚠ 提交结果未确认 · 稍后重试', 'warn')
 return {
         ok: false,
         reason: 'submit-unverified',
@@ -963,8 +964,26 @@ return {
       if (!evidenceEl) {
         evidenceEl = document.createElement('div')
         evidenceEl.id = '__sb_evidence_panel'
+        /* ★ 2026-10-26 用户要求三段式垂直排布：
+         *   角标卡片（top:76）
+         *   → 气泡提示（角标下方）
+         *   → 答题过程（气泡下方）
+         *   所以这里不能写死 top，要按气泡容器实时计算。
+         */
+        const tipsBox0 = document.getElementById('__sb_tips')
+        let evTop = 200
+        try {
+          if (tipsBox0 && tipsBox0.isConnected) {
+            const tr = tipsBox0.getBoundingClientRect()
+            if (tr.height > 0) evTop = Math.round(tr.bottom + 8)
+          } else {
+            const bd = document.getElementById('__studybuddy_badge')
+            if (bd) evTop = Math.round(bd.getBoundingClientRect().bottom + 40)
+          }
+        } catch { /* ignore */ }
         evidenceEl.style.cssText = [
-          'position:fixed', 'right:16px', 'top:120px', 'z-index:2147483646',
+          'position:fixed', 'right:16px', 'top:' + evTop + 'px', 'z-index:2147483646',
+          'transition:top .25s ease',
           'width:340px', 'max-height:56vh', 'overflow:auto',
           'background:rgba(18,20,26,.97)', 'color:#e8eaed',
           'border:1px solid rgba(88,166,255,.35)', 'border-radius:10px',
@@ -977,7 +996,7 @@ return {
       const head = document.createElement('div')
       head.style.cssText = 'display:flex;align-items:center;gap:8px;margin-bottom:8px'
       const title = document.createElement('div')
-      title.style.cssText = 'flex:1;font-weight:600;color:#8cc4ff'
+      title.style.cssText = 'flex:1;color:#8cc4ff'
       title.textContent = '作答依据'
       head.appendChild(title)
 
@@ -992,7 +1011,7 @@ return {
             // 通过应用打开；应用没开就提示
             fetch('http://127.0.0.1:39517/app/show', { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })
               .catch(() => {})
-            flash(`日志文件：${logFile}（在应用「课程日志」里可打开）`, 'info')
+            flash(`文字稿 · ${logFile}`, 'info')
           } catch { /* ignore */ }
         }
         head.appendChild(btn)
@@ -1022,7 +1041,7 @@ return {
         box.appendChild(line1)
 
         const line2 = document.createElement('div')
-        line2.style.cssText = 'color:#8ff0bc;margin-top:3px;font-weight:600'
+        line2.style.cssText = 'color:#8ff0bc;margin-top:3px;font-size:12.5px'
         line2.textContent = r.picked ? `答：${r.picked}` : '答：（AI 未作答，跳过）'
         box.appendChild(line2)
 
@@ -1045,12 +1064,46 @@ return {
       foot.textContent = '理由里带 [mm:ss] 的可到原稿对应位置核对；无理由的题目建议人工复核'
       evidenceEl.appendChild(foot)
 
-      // 30 秒后自动淡出（可手动关掉；用户想细看时能停住）
+      /* ★ 2026-10-26 用户要求：
+       *   「答题完成后 1 分钟无点击操作渐隐变透明但不消失，保留 X 供用户自行关闭」
+       *   旧实现 30 秒就打到 0.35，看着太透。
+       *   新逻辑：1 分钟无交互 → 渐隐到 0.55（仍可看清，不是几乎看不见）；
+       *          任何点击/移动 → 立刻恢复不透明并重新计时。
+       */
       clearTimeout(evidenceTimer)
-      evidenceTimer = setTimeout(() => {
-        try { if (evidenceEl) { evidenceEl.style.opacity = '0.35' } } catch { /* ignore */ }
-      }, 30000)
+      evidenceEl._sbIdle = false
+      evidenceEl.style.transition = 'opacity .6s ease'
       evidenceEl.style.opacity = '1'
+      const armIdleFade = () => {
+        clearTimeout(evidenceTimer)
+        evidenceTimer = setTimeout(() => {
+          try {
+            if (!evidenceEl || !evidenceEl.isConnected) return
+            evidenceEl._sbIdle = true
+            evidenceEl.style.opacity = '0.55'
+          } catch { /* ignore */ }
+        }, 60000)
+      }
+      armIdleFade()
+      // 面板内任何交互都算「还在看」→ 恢复不透明、重新计时
+      try {
+        if (!evidenceEl._sbWakeBound) {
+          evidenceEl._sbWakeBound = true
+          const wake = () => {
+            try {
+              if (!evidenceEl) return
+              clearTimeout(evidenceTimer)
+              evidenceEl._sbIdle = false
+              evidenceEl.style.opacity = '1'
+              armIdleFade()
+            } catch { /* ignore */ }
+          }
+          evidenceEl.addEventListener('pointerdown', wake, true)
+          evidenceEl.addEventListener('pointermove', wake, true)
+          evidenceEl.addEventListener('wheel', wake, { capture: true, passive: true })
+          evidenceEl.addEventListener('focusin', wake, true)
+        }
+      } catch { /* ignore */ }
 
       diag.evidenceShown = rows.length
       LOG(`已展示 ${rows.length} 题作答依据`)
@@ -1546,7 +1599,7 @@ return {
       // 可能是弹题挡着
       if (findQuizMask()) return false
       // 静音也播不了 → 才是真的被拦，提示用户点一下
-      flash('浏览器拦截了自动播放，请先点一下页面任意处或播放按钮', 'warn')
+      flash('⚠ 自动播放被拦截 · 请点击页面任意处', 'warn')
       return false
     }
   }
@@ -1554,7 +1607,7 @@ return {
   /** 采样一次播放状态，返回是否在推进 */
   function samplePlay() {
     const v = findVideo()
-if (!v) return { ok: false, reason: 'no-video', detail: '当前页面没找到 video 元素（可能不是播放页，或视频还没加载出来）' }
+if (!v) return { ok: false, reason: 'no-video', detail: '当前页无 video 元素（非播放页或尚未加载）' }
     if (v.ended) return { ok: false, reason: 'ended', ratio: 1 }
     const dur = Number(v.duration) || 0
     const cur = Number(v.currentTime) || 0
@@ -1612,11 +1665,11 @@ if (!v) return { ok: false, reason: 'no-video', detail: '当前页面没找到 v
     syncGuardDiag()
 
     if (failGuard.count >= FAIL_GIVEUP) {
-      flash(`⚠ 该章连续失败 ${failGuard.count} 次（${reason}），跳过本章`, 'err')
+      flash(`⚠ 连续失败 ${failGuard.count} 次 · 跳过本章`, 'err')
       LOG(`放弃章节 ${chapterId}，原因 ${reason}，已连续失败 ${failGuard.count} 次`)
       return true   // 应放弃
     }
-    flash(`⚠ ${msg || reason}（第 ${failGuard.count} 次，${Math.round(FAIL_BACKOFF[idx] / 1000)} 秒后重试）`, 'warn')
+    flash(`⚠ ${msg || reason} · 第 ${failGuard.count} 次 · ${Math.round(FAIL_BACKOFF[idx] / 1000)}s 后重试`, 'warn')
     return false
   }
 
@@ -1673,9 +1726,90 @@ if (!v) return { ok: false, reason: 'no-video', detail: '当前页面没找到 v
     return null
   }
 
+  /* ══════════════════════════════════════════════════════════════
+   * 转码前确保应用已有性能测试结果（2026-10-26 用户要求，不允许跳过）
+   *
+   * 与「用户手动抓取」的区别：
+   *   · 手动抓取 → 应用弹窗，用户要手动点「应用所选模式」
+   *   · 扩展命令 → 免确认，应用后台自动测 + 自动选最佳模式
+   *
+   * 两种入口都**不允许跳过**（用户原话：绑死在转码第一步，
+   * 不允许跳过，不然与硬件加速功能不符，相当于说谎造假）。
+   * ══════════════════════════════════════════════════════════════ */
+
+  let _perfReadyCache = null
+  let _perfGateOpen = false   // 性能测试完成后才允许预抓   // { at, needTest } 避免每次 tick 都问
+
+  async function ensurePerfReady() {
+    // 缓 30 秒：同一页面反复调用不必每次都打接口
+    if (_perfReadyCache && Date.now() - _perfReadyCache.at < 30000) {
+      return _perfReadyCache.needTest ? await runPerfOnApp() : { ok: true }
+    }
+
+    const st = await apiGet('/ext/perfState', 8000)
+    if (!st.body) {
+      return { ok: false, reason: 'app-unreachable', msg: '应用无响应，无法确认性能测试状态' }
+    }
+    if (st.body.needTest === false) {
+      _perfReadyCache = { at: Date.now(), needTest: false }
+      _perfGateOpen = true
+      diag.perfState = 'ready'
+      return { ok: true, accelMode: st.body.accelMode || '' }
+    }
+
+    // 需要测试 → 提示并强制在后台跑
+    _perfReadyCache = { at: Date.now(), needTest: true }
+    diag.perfState = 'testing'
+    flash('⚡ 首次使用需先做性能测试，正在后台进行…', 'info', { persist: true })
+    return await runPerfOnApp()
+  }
+
+  /** 让应用在后台强制跑一次性能测试，并自动应用最佳模式（免确认） */
+  async function runPerfOnApp() {
+    diag.perfState = 'running'
+    const r = await apiPost('/ext/perfRun', { autoPick: true }, 30 * 60 * 1000)
+    if (!r.body) {
+      diag.perfState = 'failed'
+      return { ok: false, reason: 'app-unreachable', msg: '应用无响应，性能测试无法进行' }
+    }
+    if (!r.body.ok) {
+      diag.perfState = 'failed'
+      return { ok: false, reason: r.body.error || 'perf-failed', msg: r.body.message || '性能测试失败' }
+    }
+
+    _perfReadyCache = { at: Date.now(), needTest: false }
+    _perfGateOpen = true
+    diag.perfState = 'done'
+    diag.perfMode = r.body.accelMode || ''
+    try {
+      const m = String(r.body.accelMode || '')
+      const label = m === 'gpu' ? '仅 GPU' : (m === 'cpu' ? '仅 CPU' : 'CPU+GPU 并行')
+      /* 2026-10-26：区分「自动选」和「复用用户的选择」，避免用户以为被改设置。
+       *   自动选 = 首次使用，应用端没有历史结果，按实测推荐落定
+       *   复用   = 用用户自己之前选的模式（推荐只是展示，不强制） */
+      if (r.body.autoSelected === true) {
+        flash('⚡ 首次使用 · 已按实测自动选用 ' + label + '（可在应用设置中更改）', 'ok')
+      } else {
+        flash('⚡ 沿用上次测试选择的 ' + label, 'ok')
+      }
+    } catch { /* ignore */ }
+    return { ok: true, accelMode: r.body.accelMode || '', result: r.body.result || null }
+  }
+
   async function ensureLog(ch) {
     diag.phase = 'ensureLog'
     diag.logStage = 'checking'
+
+    /* ★ 2026-10-26 用户要求：性能测试绑死在转码第一步，不允许跳过。
+     *   扩展命令入口 = 免确认，应用后台自动测 + 自动选最佳模式。 */
+    if (!ch || !ch.chapterId) {
+      // 章节未知时不拦（避免卡死在无信息页面上）
+    } else {
+      const perf = await ensurePerfReady()
+      if (!perf.ok) {
+        return { ok: false, reason: perf.reason || 'perf-not-ready', msg: perf.msg || '性能测试未完成，无法转码' }
+      }
+    }
 
     const tabId = await currentTabId()
     const r = await apiPost('/ext/autoCapture', {
@@ -1773,6 +1907,16 @@ if (!v) return { ok: false, reason: 'no-video', detail: '当前页面没找到 v
   const preLogState = { chapterId: '', startedAt: 0, done: false, failedAt: 0, ok: false, skipReason: '' }
 
   function prefetchLogIfNeeded(ch, ratio) {
+    /* perfGate:prefetch — 2026-10-26 性能测试绑死在转码第一步（预抓也算转码）
+     * 非 async 函数里不能 await → 用一个闸门标志：
+     *   未就绪时直接 return，等 ensureLog 那边跑完测试再放行。 */
+    if (ch && ch.chapterId && !_perfGateOpen) {
+      diag.prefetch = 'skip:perf-testing'
+      // 后台补跑一次测试（不阻塞当前调用）
+      try { ensurePerfReady().then((r) => { if (r && r.ok) _perfGateOpen = true }) } catch { /* ignore */ }
+      return
+    }
+
     /* ★ 2026-10-25：每个提前 return 都要留下痕迹。
        用户报「又不会边播边下载了」，而旧代码静默 return，日志里什么都看不到，
        完全无法判断是「开关关着」「拿不到 chapterId」还是「进度太早」。 */
@@ -1823,7 +1967,8 @@ if (!v) return { ok: false, reason: 'no-video', detail: '当前页面没找到 v
             LOG('预抓：本章已有日志，播完可直接答题')
           } else if (r.body.jobId) {
             diag.prefetch = 'started'
-            flash('📥 已在后台准备这一节的文字稿（边播边下载，播完可直接答题）', 'info')
+            // ★ 2026-10-26：这是「进行中」状态，改常驻（不 8 秒消失）
+        flash('📥 已在后台准备这一节的文字稿（边播边下载，播完可直接答题）', 'info', { persist: true })
             LOG('预抓已发起 jobId=' + r.body.jobId)
           }
         } else {
@@ -1850,7 +1995,7 @@ if (!v) return { ok: false, reason: 'no-video', detail: '当前页面没找到 v
 
   async function runOneChapter() {
     const ch = currentChapter()
-if (!ch) return { ok: false, reason: 'no-chapter', detail: '左侧章节目录没找到当前选中项（请手动点一下要学的那一章）' }
+if (!ch) return { ok: false, reason: 'no-chapter', detail: '章节目录无选中项（请手动选择目标章节）' }
     diag.chapterId = ch.chapterId
     diag.chapterName = ch.name
     diag.unfinish = ch.unfinish
@@ -1896,7 +2041,7 @@ return {
       // 绝不能因为「这一章的日志抓不到」就把整个流程卡死。
       const giveup = noteFailure(ch.chapterId, lg.reason, lg.msg)
       if (giveup) {
-        flash(`⏭ 跳过本章《${ch.name}》（日志不可用），继续下一章`, 'warn')
+        flash(`⏭ 跳过《${ch.name}》· 文字稿不可用`, 'warn')
         clearFailure()
         return { ok: true, needNext: true, skippedByError: true }
       }
@@ -1912,7 +2057,7 @@ return {
       const detailText = qr.detail ? `：${qr.detail}` : ''
       const giveup = noteFailure(ch.chapterId, qr.reason, `章节测验失败${detailText}`)
       if (giveup) {
-        flash(`⏭ 跳过本章《${ch.name}》的测验，继续下一章`, 'warn')
+        flash(`⏭ 跳过《${ch.name}》测验`, 'warn')
         clearFailure()
         return { ok: true, needNext: true, skippedByError: true }
       }
@@ -1945,11 +2090,11 @@ return {
         // 优先直接调函数，避免任何锚点导航被 CSP 拦
         fireClick(nameEl, nameEl.ownerDocument || document)
         await sleep(2500)
-        flash(`⏭ 切到下一章：${(nameEl.getAttribute('title') || txt(nameEl, 30)).trim()}`, 'info')
+        flash(`⏭ 切换章节 · ${(nameEl.getAttribute('title') || txt(nameEl, 30)).trim()}`, 'info')
         return true
       } catch { return false }
     }
-    flash('🏁 已经是最后一章了', 'info')
+    flash('⏹ 已到课程末尾', 'info')
     return false
   }
 
@@ -1969,11 +2114,22 @@ return {
     if (running) return
     running = true
     try {
+      /* ★ 2026-10-26：应用离线时不做任何操作（用户报「关掉应用程序不知道」）
+       *   离线判定由 pilot-core 的 probeApp 维护，连续 3 次失败才判离线。 */
+      if (!isAppOnline()) {
+        diag.phase = 'app-offline'
+        diag.lastError = '应用已关闭'
+        return
+      }
+
       // 弹题优先：任何时候有弹题都先处理
       if (await handlePopupQuiz()) return
 
       diag.phase = diag.phase === 'idle' ? 'start' : diag.phase
       diag.steps++
+
+      /* 2026-10-26：气泡增删会改变高度，答题面板要跟着下移 */
+      alignEvidenceUnderTips()
 
       // ── 关键：播放前先判断这个视频任务点是否已经完成 ──
       // 用户明确要求「播放视频前要检查视频是否已经播放完成，可以直接答题，
@@ -2016,7 +2172,7 @@ return {
           if (s.stalled) {
             diag.videoState = '卡住'
             const ok = await ensurePlaying()
-            if (!ok) flash('⚠ 视频卡住了，请手动点播放', 'warn')
+            if (!ok) flash('⚠ 播放中断 · 请手动恢复', 'warn')
             playMon.stall = 0
             playMon.stalled = false
           }
@@ -2034,7 +2190,7 @@ return {
           const st2 = attachState()
           if (st2.done !== true) {
             diag.videoState = '等待平台确认'
-            flash('⚠ 已播到 90%，但平台还没标记完成，继续播放', 'warn')
+            flash('⚠ 进度已达 90% · 平台未标记完成 · 继续播放', 'warn')
             return
           }
         }
@@ -2054,7 +2210,7 @@ return {
       if (!r.ok) {
         diag.lastError = r.reason || ''
         if (r.reason === 'cannot-play' || r.reason === 'no-video') {
-          flash('⚠ 当前附件不是可播放视频，尝试切到视频页', 'warn')
+          flash('⚠ 当前附件非视频 · 正在切换', 'warn')
           clickAttachByKeyword('视频')
           await sleep(2000)
         }
@@ -2090,11 +2246,61 @@ return {
     return b
   }
 
+  /**
+   * 按钮配色（2026-10-26 修复）
+   *
+   * 用户原话：「扩展端你要把背景做透明就要把字体变醒目，
+   *            不然字体跟背景融为一体谁看得见」
+   *
+   * 原配色是「浅字 + 半透明底」，一旦父级背景变透明（在线时被清空），
+   * 浅色字就直接糊在页面底色上，完全看不清。
+   * 现在改为「实底 + 深字」，不依赖父级背景，任何情况下都清晰：
+   *   开启 → 绿底白字（对比度最高）
+   *   停止 → 深灰底白字
+   */
   function paintBtn(b, label, on) {
     b.textContent = label
-    b.style.background = on ? 'rgba(63,207,127,.28)' : 'rgba(255,255,255,.08)'
-    b.style.color = on ? '#8ff0bc' : '#9aa0a8'
-    b.style.borderColor = on ? 'rgba(63,207,127,.55)' : 'rgba(255,255,255,.14)'
+    if (on) {
+      b.style.background = '#2f9e5f'
+      b.style.color = '#ffffff'
+      b.style.borderColor = '#237a47'
+    } else {
+      b.style.background = '#3c4450'
+      b.style.color = '#ffffff'
+      b.style.borderColor = '#2a313a'
+    }
+  }
+
+  /**
+   * 角标被点击时先探活一次（2026-10-26）
+   * 用户重启应用后不必刷新页面，点一下角标即可恢复。
+   */
+  async function ensureConnected() {
+    if (isAppOnline()) return true
+    const ok = await forceReconnect()
+    if (!ok) flash('⚠ 应用仍未启动', 'err')
+    return ok
+  }
+
+  /**
+   * 让「答题过程」面板始终贴在气泡提示下方（2026-10-26）
+   * 气泡堆叠、消失都会改变高度，面板要跟着走。
+   */
+  function alignEvidenceUnderTips() {
+    try {
+      const el = document.getElementById('__sb_evidence_panel')
+      if (!el) return
+      let top = 200
+      const box = document.getElementById('__sb_tips')
+      if (box && box.isConnected) {
+        const r = box.getBoundingClientRect()
+        if (r.height > 0) top = Math.round(r.bottom + 8)
+      } else {
+        const bd = document.getElementById('__studybuddy_badge')
+        if (bd) top = Math.round(bd.getBoundingClientRect().bottom + 40)
+      }
+      el.style.top = top + 'px'
+    } catch { /* ignore */ }
   }
 
   function attachButton() {
@@ -2112,14 +2318,14 @@ return {
       C.setOn(next)
       paintBtn(btn, next ? '⏸ 停止一键答题' : '▶ 一键播放答题', next)
       if (next) {
-        flash('▶ 一键播放答题已开启', 'ok')
+        flash('▶ 自动流程已启动', 'ok')
         diag.phase = 'start'
         stopFlag = false
         setTimeout(tick, 300)
       } else {
         stopFlag = true
         diag.phase = 'off'
-        flash('⏸ 已停止', 'warn')
+        flash('⏸ 自动流程已停止', 'warn')
       }
     }
     badge.appendChild(btn)
@@ -2145,6 +2351,130 @@ return {
   window.addEventListener('beforeunload', () => {
     clearInterval(hrefTimer)
     clearInterval(badgeTimer)
+    clearInterval(pageWatchTimer)
+    clearInterval(probeTimer)
+    clearInterval(mainTimer)
+  })
+
+  /* ══════════════════════════════════════════════════════════════
+   * 页面变化守护（2026-10-26 新增）
+   *
+   * 用户报：「随机点击一个课程时，扩展并未反应过来」
+   *        「防止用户手动点击下一章节扩展没反应过来」
+   *
+   * 原来只靠 1.2 秒一次的 tick 轮询，而且 tick 里没有「章节变了」的判断，
+   * 用户手动点下一章后，扩展要等很久才可能反应过来，或者根本不反应。
+   *
+   * 现在：每 600ms 检查一次「当前章节 + 当前附件 + 页面是否换过」，
+   *   一变就立刻触发一次 tick，不等主循环周期。
+   * ══════════════════════════════════════════════════════════════ */
+
+  const SB_PAGE_WATCH = {
+    lastChapterId: '',
+    lastAttach: '',
+    lastHref: location.href,
+    lastIframeSrc: '',
+    changedAt: 0,
+  }
+
+  function pageSignature() {
+    const ch = currentChapter()
+    const attach = currentAttachTitle()
+    let iframeSrc = ''
+    try {
+      const d1 = cardsDoc()
+      const fr = d1 && d1.querySelector('iframe')
+      iframeSrc = String((fr && fr.getAttribute('src')) || '').slice(0, 120)
+    } catch { /* ignore */ }
+    return {
+      chapterId: (ch && ch.chapterId) || '',
+      attach: attach || '',
+      href: location.href,
+      iframeSrc,
+    }
+  }
+
+  /** 检查页面是否发生变化，变了就返回变化描述 */
+  function detectPageChange() {
+    const sig = pageSignature()
+    const changes = []
+    if (sig.chapterId && sig.chapterId !== SB_PAGE_WATCH.lastChapterId) {
+      changes.push('章节→' + (sig.chapterId || '?'))
+    }
+    if (sig.attach && sig.attach !== SB_PAGE_WATCH.lastAttach) {
+      changes.push('附件→' + sig.attach)
+    }
+    if (sig.href !== SB_PAGE_WATCH.lastHref) {
+      changes.push('URL变化')
+    }
+    if (sig.iframeSrc && sig.iframeSrc !== SB_PAGE_WATCH.lastIframeSrc) {
+      changes.push('内容页变化')
+    }
+
+    SB_PAGE_WATCH.lastChapterId = sig.chapterId || SB_PAGE_WATCH.lastChapterId
+    SB_PAGE_WATCH.lastAttach = sig.attach || SB_PAGE_WATCH.lastAttach
+    SB_PAGE_WATCH.lastHref = sig.href
+    SB_PAGE_WATCH.lastIframeSrc = sig.iframeSrc || SB_PAGE_WATCH.lastIframeSrc
+
+    return changes.length ? changes.join('，') : ''
+  }
+
+  /* 页面变化守护：600ms 一次，比主循环更快 */
+  const pageWatchTimer = setInterval(async () => {
+    if (!isOn() || stopFlag) return
+    if (!isAppOnline()) return
+    try {
+      const change = detectPageChange()
+      if (change) {
+        SB_PAGE_WATCH.changedAt = Date.now()
+        diag.pageChange = change
+        LOG('页面变化：' + change)
+        flash('🔄 ' + change, 'info')
+        // 立刻跑一次 tick，不等主循环
+        setTimeout(() => { try { tick() } catch { /* ignore */ } }, 300)
+      }
+    } catch { /* ignore */ }
+  }, 600)
+
+  /* 应用探活：3 秒一次 */
+  const probeTimer = setInterval(() => {
+    if (!isOn()) return
+    try { probeApp() } catch { /* ignore */ }
+  }, 3000)
+
+  /* 首次探活 + 监听状态变化，更新角标与提示 */
+  setTimeout(() => { try { probeApp() } catch { /* ignore */ } }, 800)
+
+  onAppStateChange((online) => {
+    try {
+      const badge = document.getElementById('__studybuddy_badge')
+      if (badge) {
+        /* ★ 2026-10-26 修复「透明底 + 浅色字看不见」：
+         *   原来在线时把 background 设成 ''，等于清掉 content.js 的深色底，
+         *   而文字是 #e8eaed（浅色），在透明底上完全看不清。
+         *   现在始终给自身带底色的实底 + 深色文字，任何页面背景都清晰。
+         *   离线时用红底强调。 */
+        if (online) {
+          badge.style.background = 'rgba(245,247,250,.97)'
+          badge.style.color = '#1d2126'
+          badge.style.borderColor = 'rgba(0,0,0,.10)'
+        } else {
+          badge.style.background = 'rgba(255,235,235,.98)'
+          badge.style.color = '#7a1010'
+          badge.style.borderColor = 'rgba(255,107,107,.9)'
+        }
+        try {
+          for (const sp of badge.querySelectorAll('span')) {
+            if (!sp.style.color) sp.style.color = online ? '#1d2126' : '#7a1010'
+          }
+        } catch { /* ignore */ }
+      }
+      if (online) {
+        flash('✅ 应用已连接', 'ok')
+      } else {
+        flash('⚠ 应用离线 · 请重新启动', 'err')
+      }
+    } catch { /* ignore */ }
   })
 
   /* 主循环 */

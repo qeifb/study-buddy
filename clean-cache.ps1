@@ -29,6 +29,13 @@ param(
 )
 
 $ErrorActionPreference = 'Continue'
+# ★ 2026-10-27 修：被 Node 以管道重定向捕获时，PowerShell 5.1 默认按系统 OEM
+#   代码页（简体中文 = GBK/936）输出，Node 按 UTF-8 解码 → 中文全变乱码（用户实测）。
+#   只在「输出确实被重定向」时切 UTF-8；用户手动双击/在 cmd 里运行时不动，
+#   免得反而把控制台弄乱。
+if ([Console]::IsOutputRedirected) {
+  try { [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false } catch { }
+}
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not (Test-Path -LiteralPath (Join-Path $Root 'app'))) {
   Write-Host "[中止] 这个脚本必须放在 StudyBuddy 根目录（和 app\ 同级）。当前：$Root" -ForegroundColor Red
@@ -311,10 +318,20 @@ if ($loose.Count -eq 0) {
 Write-Host ''
 Write-Host '=================================================================='
 if ($DryRun) {
-  Write-Host ("  预演结果：可释放 {0}，共 {1} 个文件" -f (Format-Size $script:FreedBytes), $script:FreedFiles) -ForegroundColor Cyan
+  if ($script:FreedFiles -eq 0) {
+    Write-Host '  预演结果：没有可清理的内容（缓存都是最近写入的）' -ForegroundColor Green
+  } else {
+    Write-Host ("  预演结果：可释放 {0}，共 {1} 个文件" -f (Format-Size $script:FreedBytes), $script:FreedFiles) -ForegroundColor Cyan
+  }
   Write-Host '  去掉 -DryRun 即真正执行。' -ForegroundColor Cyan
 } else {
-  Write-Host ("  已释放 {0}，删除 {1} 个文件" -f (Format-Size $script:FreedBytes), $script:FreedFiles) -ForegroundColor Cyan
+  if ($script:FreedFiles -eq 0) {
+    # ★ 2026-10-27：新装的包缓存都不到 KeepDays 天，或者浏览器/应用开着导致运行时缓存被跳过，
+    #   这时报「已释放 0 KB」很像功能坏了。明确说清原因，别让用户以为清理失败。
+    Write-Host '  这次没有需要清理的内容 —— 缓存都是最近写入的，或者被上面的「跳过」挡住了。' -ForegroundColor Green
+  } else {
+    Write-Host ("  已释放 {0}，删除 {1} 个文件" -f (Format-Size $script:FreedBytes), $script:FreedFiles) -ForegroundColor Cyan
+  }
 }
 if ($script:Skipped.Count -gt 0) {
   Write-Host '  ── 跳过 ──' -ForegroundColor DarkGray

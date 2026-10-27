@@ -681,3 +681,208 @@ body.side-collapsed .sidebar { display: none; }
   font-size: 11.5px;
   color: #ff9a9a;
 }
+
+
+/* ═══════ 性能测试弹窗（2026-10-26）═══════ */
+.perf-state {
+  padding: 18px 4px;
+  color: #8b9199;
+  font-size: 13px;
+  line-height: 1.7;
+  text-align: center;
+}
+
+.perf-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+  margin: 6px 0 10px;
+}
+
+.perf-table th {
+  text-align: left;
+  font-weight: 600;
+  color: #8b9199;
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, .08);
+  font-size: 12px;
+}
+
+.perf-table td {
+  padding: 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, .05);
+  color: #e8eaed;
+}
+
+.perf-table tr.pick td {
+  background: rgba(88, 166, 255, .10);
+}
+
+.perf-table tr.pick td:first-child {
+  border-left: 2px solid #58a6ff;
+}
+
+.perf-badge {
+  display: inline-block;
+  padding: 1px 7px;
+  border-radius: 5px;
+  font-size: 11px;
+  background: rgba(63, 207, 127, .18);
+  color: #7ee2a8;
+  margin-left: 6px;
+}
+
+.perf-fast {
+  color: #7ee2a8;
+  font-weight: 600;
+}
+
+.perf-radio {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+}
+
+.perf-note {
+  padding: 9px 11px;
+  border-radius: 8px;
+  background: rgba(88, 166, 255, .10);
+  border: 1px solid rgba(88, 166, 255, .25);
+  color: #c9d1d9;
+  font-size: 12.5px;
+  line-height: 1.65;
+}
+
+
+/* ═══════ 性能测试结果表格（2026-10-26 用户要求）═══════ */
+.perf-result-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  margin-top: 2px;
+}
+
+.perf-result-table th,
+.perf-result-table td {
+  border: 1px solid rgba(255, 255, 255, .10);
+  padding: 7px 10px;
+  text-align: left;
+  color: #c9d1d9;
+}
+
+.perf-result-table th {
+  background: rgba(88, 166, 255, .10);
+  color: #8cc4ff;
+  font-size: 12px;
+}
+
+/* 表头合并居中 */
+.perf-result-table .perf-th-center {
+  text-align: center;
+}
+
+/* 「测试结果仅作参考」那一格：合并两列 + 自动换行 */
+.perf-result-table .perf-tips {
+  background: rgba(255, 255, 255, .03);
+  color: #8b9199;
+  font-size: 11.5px;
+  line-height: 1.65;
+  white-space: normal;
+  word-break: break-word;
+}
+
+/* 用时列 */
+.perf-result-table .perf-sec {
+  width: 96px;
+  white-space: nowrap;
+  color: #7ee2a8;
+}
+
+.perf-result-table tr.perf-win td {
+  background: rgba(63, 207, 127, .08);
+}
+
+.perf-result-table tr.perf-win td:first-child {
+  border-left: 2px solid #2f9e5f;
+}
+
+/* 已经测过 → 按钮变灰禁用 */
+.btn[disabled] {
+  opacity: .45;
+  cursor: not-allowed;
+  filter: grayscale(.6);
+}
+
+
+/* ═══════ 磁盘占用树状统计表（2026-10-26 用户要求）═══════ */
+.disk-tree-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12.5px;
+  margin-top: 8px;
+  table-layout: fixed;
+}
+
+.disk-tree-table th {
+  text-align: left;
+  padding: 5px 8px;
+  background: rgba(88, 166, 255, .10);
+  color: #8cc4ff;
+  font-size: 11.5px;
+  font-weight: 400;
+  border-bottom: 1px solid rgba(255, 255, 255, .10);
+}
+
+.disk-tree-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid rgba(255, 255, 255, .05);
+  color: #c9d1d9;
+  vertical-align: middle;
+}
+
+/* 树形缩进：第一列用 padding-left 控制层级 */
+.disk-tree-table td.t-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.disk-tree-table .lv0 { padding-left: 8px; }
+.disk-tree-table .lv1 { padding-left: 22px; }
+.disk-tree-table .lv2 { padding-left: 44px; }
+
+/* 层级图标 */
+.disk-tree-table .ico { display: inline-block; width: 14px; color: #7a828c; }
+.disk-tree-table .tdir { color: #9cc4f5; }
+.disk-tree-table .tfile { color: #9aa0a6; }
+
+.disk-tree-table td.t-size { text-align: right; white-space: nowrap; color: #7ee2a8; width: 88px; }
+.disk-tree-table td.t-files { text-align: right; white-space: nowrap; color: #8b9199; width: 62px; }
+.disk-tree-table td.t-bar { width: 118px; }
+
+/* 占比条 */
+.disk-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, .07);
+  overflow: hidden;
+}
+.disk-bar i {
+  display: block;
+  height: 100%;
+  background: linear-gradient(90deg, #3f8fd0, #63cf7f);
+  border-radius: 4px;
+}
+.disk-bar-wrap { display: flex; align-items: center; gap: 6px; }
+.disk-bar-pct { font-size: 11px; color: #8b9199; width: 38px; text-align: right; flex: 0 0 auto; }
+
+/* 合计行 */
+.disk-tree-table tr.disk-sum td {
+  border-top: 1px solid rgba(255, 255, 255, .14);
+  border-bottom: none;
+  color: #e8eaed;
+  padding-top: 6px;
+}
+
+/* C 盘区块标题 */
+.disk-sec-title {
+  margin-top: 12px;
+  font-size: 12px;
+  color: #8b9199;
+}

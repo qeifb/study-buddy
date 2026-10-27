@@ -112,8 +112,8 @@
    *   · 同类提示原地更新，不叠加、不刷屏
    *   · 位置改右下角 + 半透明，不遮挡学习通顶部控件
    */
-  let tipEl = null, tipBox = null, tipBody = null, tipAge = null, tipKind = 'info'
-  let tipSetAt = 0, tipClosed = false, tipTick = null
+  // 2026-10-26：气泡列表改造后只需要这三个状态
+  let tipClosed = false, tipTick = null
 
   const PALETTE = {
     ok: ['rgba(63,207,127,.96)', '#0b2417'],
@@ -122,79 +122,188 @@
     err: ['rgba(255,107,107,.96)', '#2b0000'],
   }
 
-  function ensureTip() {
-    if (tipEl && tipEl.isConnected) return
-    /* 统一 id：focus-mode.js 通过它复用同一个提示条，避免两个提示同时出现 */
-    const existTip = document.getElementById('__sb_tip')
-    if (existTip) { tipEl = existTip; }
-    if (!tipEl) tipEl = document.createElement('div')
-    tipEl.id = '__sb_tip'
-    tipEl.style.cssText = [
-      'position:fixed', 'left:50%', 'top:12px', 'transform:translateX(-50%)',
-      'z-index:2147483647', 'padding:7px 10px 7px 12px', 'border-radius:9px',
-      'font:12.5px/1.5 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif',
-      'box-shadow:0 5px 18px rgba(0,0,0,.32)',
-      'max-width:min(52vw,460px)', 'display:flex', 'align-items:flex-start', 'gap:8px',
-      'opacity:.94', 'pointer-events:none',
+  /**
+   * 气泡提示列表（2026-10-26 重写）
+   *
+   * 结构：角标下方一个纵向容器，每条提示是独立 item，可堆叠。
+   * 动画：Web Animations API（不注入样式表，避免与页面 CSS 冲突）
+   *   · 进场：从右侧滑入（translateX 120% → 0）
+   *   · 退场：向右侧滑出（0 → 120%），结束后移除 DOM
+   * 生命周期：
+   *   · persistent=true → 常驻（用于「正在准备的文字稿」这类进行中状态）
+   *   · 其他 → 8 秒后自动滑出
+   */
+  const TIP_LIFE_MS = 8000
+
+  function _tipContainer() {
+    let box = document.getElementById('__sb_tips')
+    if (box && box.isConnected) return box
+    box = document.createElement('div')
+    box.id = '__sb_tips'
+    box.style.cssText = [
+      'position:fixed',
+      'right:16px',
+      'top:126px',
+      'z-index:2147483647',
+      'display:flex',
+      'flex-direction:column',
+      'align-items:flex-end',
+      'gap:6px',
+      'pointer-events:none',
+      'max-width:min(52vw,440px)',
     ].join(';')
-
-    tipBody = document.createElement('span')
-    tipBody.style.cssText = 'flex:1;word-break:break-word'
-    tipEl.appendChild(tipBody)
-
-    tipAge = document.createElement('span')
-    tipAge.style.cssText = 'flex:0 0 auto;opacity:.72;font-size:11px;padding-top:1px'
-    tipEl.appendChild(tipAge)
-
-    const x = document.createElement('span')
-    x.textContent = '×'
-    x.title = '关闭后本页不再提示（后台仍继续工作）'
-    x.style.cssText = 'flex:0 0 auto;cursor:pointer;opacity:.6;font-size:14px;line-height:1;padding:0 2px;pointer-events:auto'
-    x.onclick = (e) => {
-      e.stopPropagation()
-      tipClosed = true
-      try { tipEl.remove() } catch { /* ignore */ }
-      tipEl = null
-    }
-    tipEl.appendChild(x)
-
-    if (!tipEl.isConnected) document.documentElement.appendChild(tipEl)
-
-    // 每分钟刷新「N 分钟前」——时间在变，用户就知道它一直在工作
-    if (tipTick) clearInterval(tipTick)
-    tipTick = setInterval(() => {
-      if (!tipAge || !tipAge.isConnected) return
-      /* ★ 2026-10-25 用户要求「时间按分钟计时」 */
-      const mins = Math.floor((Date.now() - tipSetAt) / 60000)
-      tipAge.textContent = mins < 1 ? '刚刚' : mins + ' 分钟前'
-    }, 30000)
+    document.documentElement.appendChild(box)
+    return box
   }
 
-  function flash(text, kind) {
-    LOG(text)
-    if (tipClosed) return
+  /** 角标被拖动后，让提示容器跟着走 */
+  function _syncTipAnchor() {
     try {
-      ensureTip()
-      if (!tipEl) return
-      const [bg, fg] = PALETTE[kind] || PALETTE.info
-      // 同类提示不重复重绘（避免闪）
-      if (tipBody.textContent !== text) tipBody.textContent = text
-      if (tipKind !== kind) {
-        tipKind = kind
-        tipEl.style.background = bg
-        tipEl.style.color = fg
-      } else if (!tipEl.style.background) {
-        tipEl.style.background = bg
-        tipEl.style.color = fg
-      }
-      tipEl.style.display = 'flex'
-      tipSetAt = Date.now()
-      if (tipAge) tipAge.textContent = '刚刚'
+      const badge = document.getElementById('__studybuddy_badge')
+      if (!badge) return
+      const r = badge.getBoundingClientRect()
+      const box = document.getElementById('__sb_tips')
+      if (!box) return
+      box.style.top = Math.round(r.bottom + 8) + 'px'
+      box.style.right = Math.max(8, Math.round(window.innerWidth - r.right)) + 'px'
     } catch { /* ignore */ }
   }
 
+  const TIP_ANIM_IN = [
+    { transform: 'translateX(120%)', opacity: 0 },
+    { transform: 'translateX(0)', opacity: 1 },
+  ]
+  const TIP_ANIM_OUT = [
+    { transform: 'translateX(0)', opacity: 1 },
+    { transform: 'translateX(120%)', opacity: 0 },
+  ]
+
+  /**
+   * 显示一条气泡提示。
+   * @param {string} text    文案
+   * @param {string} kind    ok|info|warn|err
+   * @param {object} opts    { persist:boolean } persist=true 则常驻不自动消失
+   */
+  function flash(text, kind, opts) {
+    LOG(text)
+    if (tipClosed) return
+    try {
+      const persist = Boolean(opts && opts.persist)
+      const box = _tipContainer()
+      _syncTipAnchor()
+
+      /* 同一文案已存在 → 只刷新计时，不重复插入（避免刷屏） */
+      const key = 'sb-tip-' + text
+      const dup = Array.from(box.children).find((c) => c.dataset.key === key)
+      if (dup) {
+        if (dup._sbTimer) clearTimeout(dup._sbTimer)
+        if (!persist) dup._sbTimer = setTimeout(() => _killTip(dup), TIP_LIFE_MS)
+        return
+      }
+
+      const [bg, fg] = PALETTE[kind] || PALETTE.info
+
+      const item = document.createElement('div')
+      item.dataset.key = key
+      item.style.cssText = [
+        'display:flex',
+        'align-items:flex-start',
+        'gap:8px',
+        'padding:7px 10px 7px 12px',
+        'border-radius:9px',
+        // ★ 2026-10-26：原来是 opacity:.94 叠在该元素上，看起来发虚/透底；
+        //   改为实色背景 + opacity:1，保持清晰。
+        'background:' + bg,
+        'color:' + fg,
+        'box-shadow:0 5px 18px rgba(0,0,0,.32)',
+        'font:12.5px/1.5 system-ui,-apple-system,"Segoe UI","Microsoft YaHei",sans-serif',
+        'max-width:100%',
+        'pointer-events:auto',
+        'opacity:1',
+      ].join(';')
+
+      const body = document.createElement('span')
+      body.style.cssText = 'flex:1;word-break:break-word'
+      body.textContent = text
+      item.appendChild(body)
+
+      /* 常驻项显示「N 分钟前」，让用户看到它一直在工作；非驻留不需要 */
+      let ageEl = null
+      if (persist) {
+        ageEl = document.createElement('span')
+        ageEl.style.cssText = 'flex:0 0 auto;opacity:.72;font-size:11px;padding-top:1px;white-space:nowrap'
+        ageEl.textContent = '刚刚'
+        item.appendChild(ageEl)
+        item._sbSetAt = Date.now()
+      }
+
+      const x = document.createElement('span')
+      x.textContent = '×'
+      x.title = '关闭本条提示（后台仍继续工作）'
+      x.style.cssText = 'flex:0 0 auto;cursor:pointer;opacity:.62;font-size:14px;line-height:1;padding:0 2px'
+      x.onclick = (ev) => {
+        ev.stopPropagation()
+        try { if (item._sbTimer) clearTimeout(item._sbTimer) } catch { /* ignore */ }
+        try { item.remove() } catch { /* ignore */ }
+      }
+      item.appendChild(x)
+
+      box.appendChild(item)
+
+      /* 进场动画：左滑出现 */
+      try {
+        item.animate(TIP_ANIM_IN, {
+          duration: 260,
+          easing: 'cubic-bezier(.2,.8,.2,1)',
+          fill: 'both',
+        })
+      } catch { /* 老浏览器忽略 */ }
+
+      /* 非驻留：8 秒后右滑消失 */
+      if (!persist) {
+        item._sbTimer = setTimeout(() => _killTip(item), TIP_LIFE_MS)
+      }
+
+      /* 常驻项的分钟计时 */
+      if (persist && !tipTick) {
+        tipTick = setInterval(() => {
+          const b = document.getElementById('__sb_tips')
+          if (!b || !b.isConnected) return
+          for (const c of Array.from(b.children)) {
+            if (!c._sbSetAt) continue
+            const span = c.children[1]
+            if (!span) continue
+            const mins = Math.floor((Date.now() - c._sbSetAt) / 60000)
+            span.textContent = mins < 1 ? '刚刚' : mins + ' 分钟前'
+          }
+        }, 30000)
+      }
+    } catch { /* ignore */ }
+  }
+
+  /** 右滑消失并移除 */
+  function _killTip(item) {
+    try {
+      if (!item || !item.isConnected) return
+      const anim = item.animate(TIP_ANIM_OUT, {
+        duration: 220,
+        easing: 'cubic-bezier(.4,0,1,1)',
+        fill: 'forwards',
+      })
+      anim.onfinish = () => { try { item.remove() } catch { /* ignore */ } }
+      /* 兜底：万一 onfinish 没触发 */
+      setTimeout(() => { try { item.remove() } catch { /* ignore */ } }, 400)
+    } catch {
+      try { item.remove() } catch { /* ignore */ }
+    }
+  }
+
   /** 主动恢复提示（例如页面重建后） */
-  function flashRestore() { tipClosed = false; ensureTip() }
+  function flashRestore() {
+    tipClosed = false
+    try { _tipContainer() } catch { /* ignore */ }
+  }
+
 
   /* 暴露给 focus-mode.js 等其他模块，让全页只有一个提示条（2026-10-25） */
   try { window.__sbFlash = flash } catch { /* ignore */ }
@@ -249,10 +358,58 @@
   }
 
   /** 当前 cards 里显示的是哪个附件（用 title 判断，比类名稳） */
+  /**
+   * 判断「当前是哪种附件」（视频 / 章节测验 / 学习目标 / 讨论 / 作业）。
+   *
+   * ★ 2026-10-26 重写：原来只读 cards iframe 的 document.title，
+   *   实测在真实学习通页面上 **document.title 是空字符串**（iframeTitle: ""），
+   *   于是 currentAttachTitle() 返回 ''，而 auto-pilot 的 tick 里是
+   *     if (/视频/.test(attach)) { ...检查任务点 + 启动预抓... }
+   *   /视频/.test('') === false → **整个分支永远不进**
+   *   → 用户点课时感觉「扩展没反应」，预抓也就从未触发。
+   *
+   * 现在做四层兜底，任一层命中即可：
+   *   ① cards iframe 的 document.title（原逻辑，有的页面上有效）
+   *   ② 视频 iframe 是否存在（iframe.ans-insertvideo-online / video 元素）→ 最强证据
+   *   ③ 任务点图标的 class（ans-job-video 表示视频附件）
+   *   ④ 附件标签文字（a/span 里写着「视频」「章节测验」）
+   */
   function currentAttachTitle() {
     const d1 = cardsDoc()
+
+    // ① 原逻辑
+    let byTitle = ''
+    try { byTitle = String((d1 && d1.title) || '').trim() } catch { /* ignore */ }
+    if (byTitle) return byTitle
+
     if (!d1) return ''
-    return String(d1.title || '').trim()
+
+    // ② 视频 iframe / video 元素存在 → 认定为视频附件
+    try {
+      if (d1.querySelector('iframe.ans-insertvideo-online')) return '视频'
+      if (d1.querySelector('video')) return '视频'
+    } catch { /* ignore */ }
+
+    // ③ 任务点图标 class：ans-job-video / ans-job-work
+    try {
+      const ic = d1.querySelector('.ans-job-icon')
+      if (ic) {
+        const cls = String(ic.className || '')
+        if (/ans-job-video/.test(cls)) return '视频'
+        if (/ans-job-work/.test(cls)) return '章节测验'
+      }
+    } catch { /* ignore */ }
+
+    // ④ 附件标签文字
+    try {
+      const els = d1.querySelectorAll('a,span,li,div')
+      for (const e of els) {
+        const txt = String(e.innerText || '').replace(/\s+/g, ' ').trim()
+        if (txt === '视频' || txt === '章节测验' || txt === '学习目标') return txt
+      }
+    } catch { /* ignore */ }
+
+    return ''
   }
 
   /* ───────────────────── 任务点判据 ───────────────────── */
@@ -1028,12 +1185,12 @@
         ])
         if (r && typeof r === 'object') {
           // background 失败时返回 { ok:false, error }，统一包装成 netError
-          if (r.ok === false && !r.error) {
-            return { status: 0, body: null, netError: 'background 代发失败' }
+          if (r.ok === false) {
+            const errMsg = String(r.error || 'background 代发失败')
+            noteApiResult(false, errMsg)
+            return { status: 0, body: null, netError: errMsg }
           }
-          if (r.error && r.ok === false) {
-            return { status: 0, body: null, netError: String(r.error) }
-          }
+          noteApiResult(true)
           return { status: 200, body: r, viaBackground: true }
         }
       }
@@ -1054,8 +1211,171 @@
       try { j = await r.json() } catch { j = null }
       return { status: r.status, body: j }
     } catch (e) {
+      noteApiResult(false, String(e?.message || e))
       return { status: 0, body: null, netError: String(e?.message || e) }
     }
+  }
+
+
+  /* ══════════════════════════════════════════════════════════════
+   * 应用在线状态检测（2026-10-26 新增）
+   *
+   * 用户报：「我把应用关掉，程序都不知道我关掉了」
+   *
+   * 原来 apiPost/apiGet 只有 netError，没有「应用已关闭」这个语义，
+   * 上层只会看到一堆请求失败，不知道该提示用户什么。
+   *
+   * 现在：
+   *   · 定时探活（每 3 秒打一次 /ext/hello）
+   *   · 连续失败 → 判定离线 → 角标变红 + 提示「应用已关闭」
+   *   · 恢复 → 判定在线 → 角标恢复 + 提示「应用已重连」
+   *   · 离线期间主循环暂停执行（不做无用功）
+   * ══════════════════════════════════════════════════════════════ */
+
+  const SB_APP_STATE = {
+    online: null,          // null=未知, true=在线, false=离线
+    lastOkAt: 0,
+    failCount: 0,          // 业务请求失败（不再参与离线判定，仅日志用）
+    probeFail: 0,          // ★ 探活失败计数（唯一离线依据）
+    okStreak: 0,           // ★ 连续成功次数（恢复要稳）
+    lastFlipAt: 0,         // ★ 上次切换时间（抖动抑制）
+    listeners: [],
+  }
+
+  function onAppStateChange(fn) {
+    try { SB_APP_STATE.listeners.push(fn) } catch { /* ignore */ }
+  }
+
+  function _setAppOnline(next, reason, bypassGuard) {
+    if (SB_APP_STATE.online === next) return
+    /* ★ 2026-10-26 抖动抑制（只抑制「恢复」，不抑制「掉线」）
+     *
+     * 用户报「时不时说已连接又断开的」→ 界面在两态间来回闪。
+     * 但实测发现：如果连「掉线」也抑制，会出现
+     *   「5 次探活全失败、probeFail=5，而 online 仍是 true」的假在线。
+     *
+     * 所以规则改成不对称：
+     *   · 在线 → 离线：**立即生效**（真实掉线，用户要尽快知道）
+     *   · 离线 → 在线：**5 秒抑制 + 需连续 2 次成功**（防闪烁）
+     */
+    const now = Date.now()
+    if (!bypassGuard && next === true && SB_APP_STATE.lastFlipAt && now - SB_APP_STATE.lastFlipAt < 5000) {
+      return
+    }
+    SB_APP_STATE.lastFlipAt = now
+    const prev = SB_APP_STATE.online
+    SB_APP_STATE.online = next
+    if (next) {
+      SB_APP_STATE.failCount = 0
+      SB_APP_STATE.lastOkAt = Date.now()
+      if (prev === false) LOG('应用已重连')
+    } else {
+      LOG('应用已离线：' + (reason || '多次请求失败'))
+    }
+    for (const fn of SB_APP_STATE.listeners) {
+      try { fn(next, prev) } catch { /* ignore */ }
+    }
+  }
+
+  /** 主动探活一次。返回 true=在线 */
+  /**
+   * 主动探活（2026-10-26 重写，修「离线/在线反复抖动」）
+   *
+   * 用户报：「应用明明已经启动但是扩展说离线，时不时说已连接又断开的」
+   *
+   * 旧实现三个缺陷：
+   *   ① 探活和业务请求共用 failCount → 应用忙时业务超时被算成「离线」
+   *   ② 超时只有 4 秒 → 主进程忙时必然误判
+   *   ③ 3 次失败就判离线、1 次成功就恢复 → 界面反复闪烁
+   *
+   * 新规则：
+   *   ① 只看 probeFail（独立计数），业务失败不参与
+   *   ② 超时 8 秒
+   *   ③ 连续 5 次探活失败（约 15 秒）才判离线
+   *   ④ 连续 2 次成功才判恢复（避免一次侥幸）
+   */
+  const PROBE_FAIL_TO_OFFLINE = 5
+  const PROBE_OK_TO_ONLINE = 2
+
+  async function probeApp() {
+    try {
+      // ★ 8 秒超时：应用在跑 perf-bench/转码时事件循环被占，4 秒不够
+      const r = await apiPost('/ext/hello', { probe: true, version: 'probe', tabs: [] }, 8000)
+
+      const ok = Boolean(r && r.body && r.body.ok)
+      if (ok) {
+        SB_APP_STATE.probeFail = 0
+        SB_APP_STATE.okStreak++
+        SB_APP_STATE.lastOkAt = Date.now()
+        // 连续 2 次成功才翻回在线
+        if (SB_APP_STATE.online !== true && SB_APP_STATE.okStreak >= PROBE_OK_TO_ONLINE) {
+          _setAppOnline(true)
+        }
+        return true
+      }
+
+      SB_APP_STATE.okStreak = 0
+      SB_APP_STATE.probeFail++
+      if (SB_APP_STATE.probeFail >= PROBE_FAIL_TO_OFFLINE) {
+        _setAppOnline(false, r?.netError || '探活连续失败')
+      }
+      return false
+    } catch (e) {
+      SB_APP_STATE.okStreak = 0
+      SB_APP_STATE.probeFail++
+      if (SB_APP_STATE.probeFail >= PROBE_FAIL_TO_OFFLINE) {
+        _setAppOnline(false, String(e?.message || e))
+      }
+      return false
+    }
+  }
+
+  /** 记录一次业务请求的结果，用于辅助判断在线状态 */
+  /**
+   * 记录一次业务请求结果（2026-10-26 修改）
+   *
+   * ★ 重要：**业务请求失败不再参与「离线」判定**。
+   *   用户报「应用明明已经启动但是扩展说离线」——
+   *   根因就是转码/轮询超时被算成应用离线。
+   *   现在业务成功可以「辅助加速恢复」，但业务失败**绝不**触发离线。
+   *   离线与否只看 probeApp() 的独立计数。
+   */
+  function noteApiResult(ok, netErr) {
+    if (ok) {
+      SB_APP_STATE.failCount = 0
+      SB_APP_STATE.lastOkAt = Date.now()
+      /* 业务成功 = 应用肯定活着 → 直接标记在线（比等探活快） */
+      if (SB_APP_STATE.online === false) {
+        SB_APP_STATE.probeFail = 0
+        SB_APP_STATE.okStreak = PROBE_OK_TO_ONLINE
+        /* 业务请求成功 = 应用确实答上了 → 绕过恢复抑制 */
+        _setAppOnline(true, '', true)
+      }
+    } else if (netErr) {
+      // 仅记录，不参与离线判定
+      SB_APP_STATE.failCount++
+    }
+  }
+
+  /** 立刻探活一次（用于用户点角标 / 重启应用后快速恢复） */
+  async function forceReconnect() {
+    SB_APP_STATE.failCount = 0
+    SB_APP_STATE.probeFail = 0
+    SB_APP_STATE.okStreak = 0
+    // 手动重连时绕过抖动抑制
+    SB_APP_STATE.lastFlipAt = 0
+    const ok = await probeApp()
+    /* ★ 2026-10-26：手动重连是一次显式动作，不该要求「连续 2 次成功」。
+     *   探活成功 1 次就直接置在线（用户点了重连，看到成功就是成功）。 */
+    if (ok && SB_APP_STATE.online !== true) {
+      SB_APP_STATE.okStreak = PROBE_OK_TO_ONLINE
+      _setAppOnline(true, '', true)
+    }
+    return ok
+  }
+
+  function isAppOnline() {
+    return SB_APP_STATE.online !== false
   }
 
   async function apiGet(pathname, timeoutMs = 15000) {
@@ -1074,9 +1394,12 @@
           new Promise((_, rej) => setTimeout(() => rej(new Error('background 代理超时')), timeoutMs + 3000)),
         ])
         if (r && typeof r === 'object') {
-          if (r.error && r.ok === false) {
-            return { status: 0, body: null, netError: String(r.error) }
+          if (r.ok === false) {
+            const errMsg = String(r.error || 'background 代发失败')
+            noteApiResult(false, errMsg)
+            return { status: 0, body: null, netError: errMsg }
           }
+          noteApiResult(true)
           return { status: 200, body: r, viaBackground: true }
         }
       }
@@ -1091,6 +1414,7 @@
       try { j = await r.json() } catch { j = null }
       return { status: r.status, body: j }
     } catch (e) {
+      noteApiResult(false, String(e?.message || e))
       return { status: 0, body: null, netError: String(e?.message || e) }
     }
   }
@@ -1104,6 +1428,8 @@
     // 确定性解码（2026-10-24）：字体字形 MD5 → 固定映射表，100% 确定
     extractFontBase64, b64ToBytes, sbMd5, decodeByFontMap, buildFontCtx,
     apiPost, apiGet, LOG, LS_SUBMITTED,
+    // 2026-10-26 应用在线状态
+    SB_APP_STATE, probeApp, forceReconnect, noteApiResult, isAppOnline, onAppStateChange,
   }
   LOG('核心模块已加载')
 })()

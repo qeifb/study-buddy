@@ -20,6 +20,10 @@ const DEBUG_ENDPOINTS = process.env.STUDY_BUDDY_DEBUG === '1'
 /** 待办任务表：id → job */
 const jobs = new Map()
 /** 扩展最近一次心跳 */
+/* 性能测试执行器（由 main.js 注入，2026-10-26） */
+let perfRunner = null
+function setPerfRunner(fn) { perfRunner = fn }
+
 let lastHello = null
 /** 扩展最近一次上报的播放状态 */
 let lastPlayState = null
@@ -283,6 +287,48 @@ function createExtServer({ port = DEFAULT_PORT, onLog, existingServer } = {}) {
     // 自动抓取当前页面那节课的课程日志（扩展点「一键播放答题」时自动调用）。
     // 契约见 docs/quiz-api-contract.md B 节。抓取是长任务（1-3 分钟），
     // 所以立即返回 jobId，由扩展轮询 /ext/autoCapture/status 拿进度。
+    /* ══════════════════════════════════════════════════════════════
+     * 性能测试状态查询（2026-10-26 用户要求）
+     *
+     * 用户原话：「浏览器扩展插件也是，命令应用看是否有测试结果，
+     *            没有就强制性进行测试，有就调用最近一次测试结果
+     *            和用户的选择进行转码工作」
+     * ══════════════════════════════════════════════════════════════ */
+    if (path === '/ext/perfState') {
+      try {
+        const st = perfRunner && perfRunner.getState ? perfRunner.getState() : null
+        if (!st) return json(res, 200, { ok: true, needTest: true, accelMode: '', testedAt: 0, result: null })
+        return json(res, 200, {
+          ok: true,
+          needTest: Boolean(st.needTest),
+          accelMode: st.accelMode || '',
+          testedAt: st.testedAt || 0,
+          result: st.result || null,
+          running: Boolean(st.running),
+        })
+      } catch (e) {
+        return json(res, 200, { ok: false, needTest: true, error: 'perf-state-failed', message: String(e && e.message || e) })
+      }
+    }
+
+    /* 让应用在后台强制跑一次性能测试并自动应用最佳模式（免确认）
+     *
+     * 用户原话：「浏览器扩展直接命令就不用，直接开始直接调用最佳性能免确认」
+     *          「把这个性能测试流程绑死在转码第一步，不允许用户跳过」 */
+    if (req.method === 'POST' && path === '/ext/perfRun') {
+      const body = await readBody(req)
+      try {
+        if (!perfRunner || !perfRunner.run) {
+          return json(res, 200, { ok: false, error: 'perf-runner-missing', message: '应用未提供性能测试执行器' })
+        }
+        const autoPick = body?.autoPick !== false
+        const r = await perfRunner.run({ autoPick })
+        return json(res, 200, r || { ok: false, error: 'perf-run-failed' })
+      } catch (e) {
+        return json(res, 200, { ok: false, error: 'perf-run-failed', message: String(e && e.message || e) })
+      }
+    }
+
     if (req.method === 'POST' && path === '/ext/autoCapture') {
       const body = await readBody(req)
       if (!body || typeof body !== 'object') {
@@ -381,6 +427,15 @@ function createExtServer({ port = DEFAULT_PORT, onLog, existingServer } = {}) {
     /** 注册页内问答处理器 */
     setAskHandler(fn) { askHandler = fn },
     setCourseHandler(fn) { courseHandler = fn },
+    /* 性能测试执行器（2026-10-26）：扩展 /ext/perfRun 走这里，免确认自动选最佳 */
+    setPerfRunner(fn) { perfRunner = fn },
+    getPerfState() {
+      try { return perfRunner && perfRunner.getState ? perfRunner.getState() : null } catch (e) { return null }
+    },
+    async runPerf(opts) {
+      try { return perfRunner && perfRunner.run ? await perfRunner.run(opts || {}) : { ok: false, error: 'perf-runner-missing' } }
+      catch (e) { return { ok: false, error: 'perf-run-exception', message: String(e && e.message || e) } }
+    },
     /** 注册自动抓取处理器 */
     setAutoCaptureHandler(fn) { autoCaptureHandler = fn },
     /** 注册交卷回执处理器 */
@@ -429,4 +484,5 @@ function createExtServer({ port = DEFAULT_PORT, onLog, existingServer } = {}) {
   }
 }
 
-module.exports = { createExtServer, DEFAULT_PORT }
+module.exports = {
+  setPerfRunner, createExtServer, DEFAULT_PORT }

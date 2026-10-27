@@ -16,8 +16,8 @@ const { spawn, execFile } = require('node:child_process')
 
 const { listBrowsers, attachToBrowser } = require('./core/browsers')
 const { launchDedicated, closeDedicated } = require('./core/launcher')
-const { createExtServer, DEFAULT_PORT: EXT_DEFAULT_PORT } = require('./core/extserver')
-const { captureLesson, captureLessonViaExtension } = require('./core/capture')
+const { createExtServer, DEFAULT_PORT: EXT_DEFAULT_PORT , setPerfRunner } = require('./core/extserver')
+const { captureLesson, captureLessonViaExtension, isTranscribing } = require('./core/capture')
 const { store } = require('./core/store')
 const { chat, readSettings, writeSettings, testConnection, testVision, recognizeImage } = require('./core/ai')
 const lessons = require('./core/lessons')
@@ -257,6 +257,75 @@ function ensureDirs() {
     try { fs.mkdirSync(d, { recursive: true }) } catch { /* ignore */ }
   }
 }
+
+/* ══════════════════════════════════════════════════════════════════
+ * 修正 tools/pyenv 的 pyvenv.cfg（换机器自愈）
+ *
+ * 事故（2026-10-27，用户另一台机 C:\Users\kk 实测）：
+ *   离线版把 pyenv 一起打进包，但 pyenv 原本只是个 venv —— pyvenv.cfg 里
+ *     home = C:\Users\qq155\AppData\Local\Programs\Python\Python314
+ *   是打包机的绝对路径，而标准库（Lib/encodings、Lib/os.py…）、
+ *   python314.dll、DLLs/*.pyd 全在那个外部目录里，pyenv 内只有 site-packages。
+ *   换到别人机器上 python.exe 直接拒绝启动：
+ *     did not find executable at 'C:\Users\qq155\...\python.exe'   exit=103
+ *   用户看到的是「测试失败：测试音频生成失败：Command failed: ...」。
+ *
+ * 现在 pyenv 已补齐成**自包含**（标准库 + DLLs + python314.dll + 根目录 python.exe），
+ * 只剩 home 这一行是绝对路径。所以每次启动按实际安装位置改写它，
+ * 整个文件夹搬到任何盘、任何机器都不用改代码。
+ * ══════════════════════════════════════════════════════════════════ */
+function repairPyenvHome() {
+  try {
+    const pyenv = path.join(TOOLS_DIR, 'pyenv')
+    const venvExe = path.join(pyenv, 'Scripts', 'python.exe')
+    if (!fs.existsSync(venvExe)) return      /* 没装转写环境，交给「安装转写环境」按钮 */
+
+    /* 判断 pyenv 是否已自包含：标准库 + python DLL 都在包内 */
+    const stdlibOk = fs.existsSync(path.join(pyenv, 'Lib', 'encodings', '__init__.py'))
+    const dllOk = ['python314.dll', 'python313.dll', 'python312.dll', 'python311.dll', 'python3.dll']
+      .some((f) => fs.existsSync(path.join(pyenv, f)))
+
+    const cfgPath = path.join(pyenv, 'pyvenv.cfg')
+    let lines = []
+    try {
+      lines = String(fs.readFileSync(cfgPath, 'utf8')).split(/\r?\n/)
+    } catch { lines = [] }
+
+    let curHome = ''
+    const kept = []
+    for (const ln of lines) {
+      const m = ln.match(/^\s*home\s*=\s*(.*)$/i)
+      if (m) { curHome = m[1].trim(); continue }
+      if (/^\s*executable\s*=/i.test(ln)) continue
+      if (ln.trim()) kept.push(ln)
+    }
+    /* python 3.14 起 home 目录里必须有 python.exe，否则 exit 103 */
+    const homeOk = Boolean(curHome) && fs.existsSync(path.join(curHome, 'python.exe'))
+
+    if (!stdlibOk || !dllOk) {
+      /* 旧包：标准库还在外部，改 home 只会更糟。本机 home 有效就保持原样 */
+      if (!homeOk && curHome) {
+        appendAppLog('[env] pyenv 不是自包含（缺标准库或 python DLL），且 home 不存在：' + curHome)
+      }
+      return
+    }
+
+    /* 自包含：home 目录里要有一个 python.exe 满足校验，用一个占位副本即可 */
+    const rootExe = path.join(pyenv, 'python.exe')
+    if (!fs.existsSync(rootExe)) {
+      try { fs.copyFileSync(venvExe, rootExe) } catch { return }
+    }
+    if (curHome === pyenv && fs.existsSync(rootExe)) return   /* 已修好，不重复写盘 */
+
+    const out = ['home = ' + pyenv, ...kept].join('\r\n') + '\r\n'
+    fs.writeFileSync(cfgPath, out, 'utf8')
+    appendAppLog('[env] 已修正 pyvenv.cfg：home ' + (curHome || '(空)') + ' → ' + pyenv)
+  } catch (e) {
+    try { appendAppLog('[env] 修正 pyvenv.cfg 失败：' + (e && e.message)) } catch { /* ignore */ }
+  }
+}
+
+repairPyenvHome()
 
 /**
  * 课程日志索引与「当前页面 → 哪篇日志」的匹配。
@@ -1600,24 +1669,42 @@ function transcribePaths() {
  * 答案是不会（所有数据都在 <root> 下），但用户看不到证据。
  * 这个接口把「程序目录占用」和「C 盘残留」都统计出来，让用户自己能看。
  */
-function dirUsage(dir, depth = 0) {
-  const out = { bytes: 0, files: 0 }
-  if (!dir || depth > 10) return out
+/**
+ * 递归统计目录大小（2026-10-26 升级为「一次遍历同时收集树」）
+ *
+ * 用户要求把磁盘占用做成树状表格。为了拿到二级明细，
+ * 旧做法是「先整体递归统计，再对每个一级目录单独递归一遍」——慢一倍。
+ * 现在在**同一次递归**里顺手收集 depth <= maxDepth 的子节点。
+ *
+ * @param {string} dir  目录路径
+ * @param {number} depth 当前深度（0 = ROOT 的直接子项）
+ * @param {number} maxDepth 收集到第几层子节点（1 = 收集一级目录的子目录）
+ * @returns {{bytes:number, files:number, children:Array}}
+ */
+function dirUsage(dir, depth = 0, maxDepth = 1) {
+  const out = { bytes: 0, files: 0, children: [] }
+  if (!dir || depth > 12) return out
   let items = []
   try { items = fs.readdirSync(dir, { withFileTypes: true }) } catch { return out }
   for (const it of items) {
     const p = path.join(dir, it.name)
     try {
       if (it.isDirectory()) {
-        const sub = dirUsage(p, depth + 1)
+        const sub = dirUsage(p, depth + 1, maxDepth)
         out.bytes += sub.bytes
         out.files += sub.files
+        /* 只在还没到收集上限时记录子节点 */
+        if (depth < maxDepth) {
+          out.children.push({ name: it.name, bytes: sub.bytes, files: sub.files })
+        }
       } else {
         out.bytes += fs.statSync(p).size
         out.files++
       }
     } catch { /* ignore */ }
   }
+  /* 大的排前面，一眼看出谁占地方 */
+  if (out.children.length) out.children.sort((x, y) => y.bytes - x.bytes)
   return out
 }
 
@@ -1665,12 +1752,61 @@ ipcMain.handle('disk:usage', async () => {
 
   // ① 程序目录各部分
   const parts = []
-  for (const name of ['data', 'runtime', 'browser-profile', 'cache', 'tools', 'archive']) {
+  /* ★ 2026-10-25 修：原来只统计 6 个目录，漏了 app/dist/repo 等，
+   *   导致显示 2.69GB 而实际 7.71GB（用户实测发现）。
+   *   现在统计程序目录下所有一级目录 + 根目录文件，做到「显示 = 实际」。 */
+  const statNames = []
+  try {
+    for (const e of fs.readdirSync(ROOT, { withFileTypes: true })) {
+      if (e.isDirectory()) statNames.push(e.name)
+    }
+  } catch { /* ignore */ }
+  for (const name of statNames.sort()) {
     const p = path.join(ROOT, name)
     if (!fs.existsSync(p)) continue
-    const u = dirUsage(p)
-    parts.push({ name, path: p, bytes: u.bytes, files: u.files, text: fmt(u.bytes) })
+    const u = dirUsage(p, 0, 1)
+    /* ★ 2026-10-26：小于 3MB 的项不值得占一行（占比 0.0%），直接跳过，
+     *   否则会出现 .agent-teams / .dsh-meow / docs 这类一堆 0.0% 的行。 */
+    if (u.bytes < 3145728) continue
+    parts.push({
+      name,
+      path: p,
+      bytes: u.bytes,
+      files: u.files,
+      text: fmt(u.bytes),
+      /* 子目录明细（树状表格用），已按大小降序。
+       * ★ 2026-10-26：只列「占比 >= 1% 或前 5 个」的子项，
+       *   否则 app 下面会列出 core/renderer/extension/node_modules/assets 等一堆，
+       *   表格太长反而不好看。 */
+      children: (() => {
+        const all = (u.children || []).map((x) => ({
+          name: x.name,
+          bytes: x.bytes,
+          files: x.files,
+          text: fmt(x.bytes),
+        }))
+        if (!all.length) return []
+        const total = u.bytes || 1
+        const kept = all.filter((x, idx) => (idx < 5 && x.bytes >= 409600) || (x.bytes / total) >= 0.01)
+        return kept
+      })(),
+    })
   }
+  // 根目录散落的文件也算进去（clean-cache.ps1 / README.md 等）
+  let rootFilesBytes = 0
+  try {
+    for (const e of fs.readdirSync(ROOT, { withFileTypes: true })) {
+      if (e.isFile()) {
+        try { rootFilesBytes += fs.statSync(path.join(ROOT, e.name)).size } catch { /* ignore */ }
+      }
+    }
+  } catch { /* ignore */ }
+  if (rootFilesBytes >= 3145728) {
+    parts.push({ name: '根目录文件', path: ROOT, bytes: rootFilesBytes, files: 0, text: fmt(rootFilesBytes) })
+  }
+  /* 按大小降序：一眼看出谁占地方（UI 直接按顺序渲染） */
+  parts.sort((x, y) => y.bytes - x.bytes)
+
   const rootTotal = parts.reduce((a, x) => a + x.bytes, 0)
 
   // ② C 盘残留（只查已知位置，不做全盘扫描）
@@ -1691,12 +1827,20 @@ ipcMain.handle('disk:usage', async () => {
   }
   const cTotal = cparts.reduce((a, x) => a + x.bytes, 0)
 
+  /* 占比：给树状表格画进度条用（相对程序目录总量） */
+  const pct = (b) => (rootTotal > 0 ? Math.round((b / rootTotal) * 1000) / 10 : 0)
+  for (const x of parts) {
+    x.pct = pct(x.bytes)
+    for (const c of x.children || []) c.pct = pct(c.bytes)
+  }
+
   return {
     root: ROOT,
     parts,
-    rootTotal: { bytes: rootTotal, text: fmt(rootTotal) },
+    rootTotal: { bytes: rootTotal, text: fmt(rootTotal), files: parts.reduce((a, x) => a + (x.files || 0), 0) },
     cdrive: cparts,
     cdriveTotal: { bytes: cTotal, text: fmt(cTotal) },
+    cdrivePct: (() => { const t = cparts.reduce((a, x) => a + x.bytes, 0) || 1; return cparts.map((x) => Object.assign({}, x, { pct: Math.round((x.bytes / t) * 1000) / 10 })) })(),
     cleanScript: path.join(ROOT, 'clean-cache.ps1'),
     hasCleanScript: fs.existsSync(path.join(ROOT, 'clean-cache.ps1')),
   }
@@ -1737,8 +1881,11 @@ except Exception:
     pass
 # cublas / cudnn
 import ctypes
-base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-nvdir = os.path.join(base, "pyenv", "Lib", "site-packages", "nvidia")
+# 2026-10-25 fix: 不能从 __file__ 推断路径！
+#   这个检测脚本被写在 %TEMP% 里，dirname(dirname(__file__)) 得到 C:\Users\<name>，
+#   再拼 pyenv/Lib/site-packages/nvidia 永远不存在 -> 装好了也报缺少组件。
+#   改由 Node 侧通过环境变量传真实路径。
+nvdir = os.environ.get("SB_NVDIR") or ""
 def find(dll):
     try:
         ctypes.CDLL(dll); return True
@@ -1760,7 +1907,12 @@ print(json.dumps(out, ensure_ascii=False))
 `
     const tmp = path.join(os.tmpdir(), 'sb-gpu-' + Date.now() + '.py')
     fs.writeFileSync(tmp, script, 'utf8')
-    require('node:child_process').execFile(pyenv, [tmp], { timeout: 60000, windowsHide: true },
+    const nvdirPath = path.join(TOOLS_DIR, 'pyenv', 'Lib', 'site-packages', 'nvidia')
+    require('node:child_process').execFile(pyenv, [tmp], {
+      timeout: 60000,
+      windowsHide: true,
+      env: { ...process.env, SB_NVDIR: nvdirPath, PYTHONIOENCODING: 'utf-8' },
+    },
       (err, stdout) => {
         try { fs.rmSync(tmp, { force: true }) } catch { /* ignore */ }
         let info = {}
@@ -1808,6 +1960,512 @@ ipcMain.handle('gpu:install', async (event) => {
       })
   })
 })
+
+/* ══════════════════════════════════════════════════════════════════
+ * 三模式性能基准（2026-10-26 用户需求）
+ *
+ * 用户原话：
+ *   「以后打开应用开始转码前先出现一个弹窗，提示开始转码前先做一次性能测试，
+ *    看3种模式哪种合适，并把测试结果展示出来和模式选择框展示出来
+ *    并推荐用户选择哪种模式…仅只做推荐，用户想选择其他模式还是可以自行选择」
+ *
+ * ⚠️ 全程异步 execFile，绝不 execFileSync（会冻住界面）
+ * ══════════════════════════════════════════════════════════════════ */
+/**
+ * 跑一条最小 python 命令，确认转写环境真的能启动。
+ *
+ * 事故（2026-10-27）：换机器后 python.exe 因 pyvenv.cfg 的 home 指向不存在的目录
+ * 直接 exit 103，而两条 execFile 只报「Command failed: <命令>」（message 前 140 字符
+ * 正好把 stderr 切掉），界面上完全看不出原因。先探活就能给出人话。
+ */
+function probePython(pyexe, timeout) {
+  const { execFile } = require('node:child_process')
+  return new Promise((resolve) => {
+    execFile(pyexe, ['-c', 'import sys,encodings;print(sys.version.split()[0])'],
+      { timeout: timeout || 20000, windowsHide: true, env: { ...process.env, PYTHONIOENCODING: 'utf-8' } },
+      (err, stdout, stderr) => {
+        if (!err) return resolve({ ok: true, ver: String(stdout || '').trim() })
+        const raw = String(stderr || '') || String((err && err.message) || '')
+        const detail = raw.split(/\r?\n/).map((s) => s.trim()).filter(Boolean).slice(0, 3).join(' / ')
+        resolve({ ok: false, code: err && err.code, detail: detail.slice(0, 400) || '(无输出)' })
+      })
+  })
+}
+
+ipcMain.handle('perf:bench', async (event, opts) => {
+  const pyenv = path.join(TOOLS_DIR, 'pyenv', 'Scripts', 'python.exe')
+  if (!fs.existsSync(pyenv)) return { ok: false, err: '转写环境还没装好（缺少 tools/pyenv）' }
+  const benchPy = path.join(TOOLS_DIR, 'perf-bench.py')
+  if (!fs.existsSync(benchPy)) return { ok: false, err: '缺少 tools/perf-bench.py' }
+
+  /* ★ 2026-10-27：转码进行中禁止做性能测试。
+   * 原因：性能测试本身就是「跑三遍转写」，转码正抢着 CPU/GPU 时测出来的数字
+   * 会明显偏慢，推荐的模式也可能是错的 —— 等于用一份被污染的数据去指导后面的转码。
+   * 让人等这一节转完再测，比给一个错推荐强。 */
+  if (isTranscribing()) {
+    return { ok: false, err: '正在转码中，现在测出来的耗时不准确。请等这一节转码完成后再做性能测试。' }
+  }
+
+  /* 先确认 python 真能跑起来：换机器最常见的死因就是 pyenv 缺标准库/DLL */
+  const pyProbe = await probePython(pyenv)
+  if (!pyProbe.ok) {
+    return { ok: false, err: '转写环境起不来（python.exe 无法启动）：' + pyProbe.detail }
+  }
+
+  const { execFile } = require('node:child_process')
+  const stamp = Date.now()
+  const genPy = path.join(os.tmpdir(), 'sb-perf-gen-' + stamp + '.py')
+  const media = path.join(os.tmpdir(), 'sb-perf-media-' + stamp + '.mp4')
+  const outJson = path.join(os.tmpdir(), 'sb-perf-out-' + stamp + '.json')
+
+  const genSrc = [
+    'import os, sys',
+    'p = sys.argv[1]',
+    'sec = int(sys.argv[2])',
+    'sys.path.insert(0, sys.argv[3])',
+    'from transcribe import _patch_av_compat',
+    '_patch_av_compat()',
+    'import av, numpy as np',
+    'sr = 16000',
+    'out = av.open(p, mode="w")',
+    'st = out.add_stream("aac", rate=sr)',
+    'st.layout = "mono"',
+    'for i in range(0, sr * sec, 1024):',
+    '    n = min(1024, sr * sec - i)',
+    '    t = np.arange(i, i + n) / sr',
+    '    sig = np.sin(2 * np.pi * 440 * t) * 4000',
+    '    arr = sig.astype("int16").reshape(1, -1)',
+    '    fr = av.AudioFrame.from_ndarray(arr, format="s16", layout="mono")',
+    '    fr.sample_rate = sr',
+    '    fr.pts = i',
+    '    for pk in st.encode(fr):',
+    '        out.mux(pk)',
+    'for pk in st.encode(None):',
+    '    out.mux(pk)',
+    'out.close()',
+    'print("OK")',
+  ].join('\n')
+
+  const cleanup = () => {
+    for (const f of [genPy, media, outJson]) {
+      try { fs.rmSync(f, { force: true }) } catch { /* ignore */ }
+    }
+  }
+  const send = (payload) => {
+    try { event.sender.send('perf:event', payload) } catch { /* ignore */ }
+  }
+
+  return new Promise((resolve) => {
+    try { fs.writeFileSync(genPy, genSrc, 'utf8') } catch (e) {
+      cleanup()
+      return resolve({ ok: false, err: '写临时脚本失败' })
+    }
+    send({ kind: 'stage', text: '准备测试音频…' })
+
+    broadcastPerfEvent({ kind: 'start', text: '性能测试：准备测试音频…' })
+    execFile(pyenv, [genPy, media, '30', TOOLS_DIR], { timeout: 180000, windowsHide: true },
+      (gErr) => {
+        if (gErr || !fs.existsSync(media)) {
+          cleanup()
+          const gRaw = String((gErr && gErr.stderr) || '') + ' ' + String((gErr && gErr.message) || '')
+          return resolve({ ok: false, err: '测试音频生成失败：' + (gRaw.trim().slice(-400) || '(无输出)') })
+        }
+        send({ kind: 'stage', text: '开始测试三种模式（约 1~3 分钟）…' })
+
+        const env = { ...process.env, PYTHONIOENCODING: 'utf-8', HF_HUB_OFFLINE: '1' }
+        const modelArg = path.join(TOOLS_DIR, 'models', 'large-v3-turbo')
+        const child = execFile(pyenv,
+          [benchPy, media, '--out', outJson, '--model-dir', modelArg,
+            '--speed', String((opts && opts.speed) || 'balanced')],
+          { timeout: 3600000, windowsHide: true, env },
+          (bErr, _out, bErrText) => {
+            let data = null
+            try {
+              if (fs.existsSync(outJson)) data = JSON.parse(fs.readFileSync(outJson, 'utf8'))
+            } catch { /* ignore */ }
+            cleanup()
+            if (!data) {
+              return resolve({
+                ok: false,
+                err: '基准测试失败：' + String((bErrText || '') + ((bErr && bErr.message) || '')).slice(-220),
+              })
+            }
+            data.ok = Boolean(data.ok)
+            resolve(data)
+          })
+
+        try {
+          if (child.stdout) child.stdout.on('data', (d) => {
+            const s = String(d)
+            const mm = s.match(/=== (.+?) ===/)
+            if (mm) send({ kind: 'stage', text: '正在测 ' + mm[1] + '…' })
+          })
+        } catch { /* ignore */ }
+      })
+  })
+})
+
+/* 保存用户选择的加速模式（只做推荐，不强制） */
+/* ══════════════════════════════════════════════════════════════════
+ * 性能测试状态查询（2026-10-26 用户要求）
+ *
+ * 用户原话：
+ *   「性能测试结果要保留，只保留最近一次的测试结果，
+ *    用户测试完一次之后后期再次使用应用，应用直接调用以往的测试结果
+ *    和用户的选择就不用再次测试了，浏览器扩展插件也是，
+ *    命令应用看是否有测试结果，没有就强制性进行测试」
+ *
+ * 判定「有可用结果」的条件（三条全满足）：
+ *   ① perfTestedAt 存在
+ *   ② accelMode 存在
+ *   ③ perfResult 存在（三模式实测数据，用于展示与复用）
+ * ══════════════════════════════════════════════════════════════════ */
+ipcMain.handle('perf:needTest', async () => {
+  try {
+    const s = readSettings() || {}
+    const hasResult = Boolean(
+      s.perfTestedAt
+      && s.accelMode
+      && s.perfResult
+      && Array.isArray(s.perfResult.modes)
+      && s.perfResult.modes.length > 0
+    )
+    const names = await getMachineNames()
+    return {
+      ok: true,
+      needTest: !hasResult,
+      accelMode: s.accelMode || '',
+      testedAt: s.perfTestedAt || 0,
+      result: s.perfResult || null,
+      cpuName: names.cpuName,
+      gpuName: names.gpuName,
+    }
+  } catch (e) {
+    return { ok: false, needTest: true, err: String((e && e.message) || e) }
+  }
+})
+
+/* 保存测试结果（只保留最近一次，覆盖旧值） */
+ipcMain.handle('perf:saveResult', async (_e, payload) => {
+  try {
+    const p = payload || {}
+    const names = await getMachineNames()
+    const patch = {
+      perfTestedAt: Date.now(),
+      accelMode: String(p.accelMode || 'auto'),
+      /* ★ 只保留最近一次：整体覆盖，不做数组累积 */
+      perfResult: {
+        dur: Number(p.result?.dur || 0),
+        modes: Array.isArray(p.result?.modes) ? p.result.modes : [],
+        recommend: String(p.result?.recommend || ''),
+        gainVsSecond: Number(p.result?.gainVsSecond || 0),
+        note: String(p.result?.note || ''),
+        cpuName: names.cpuName,
+        gpuName: names.gpuName,
+      },
+    }
+    writeSettings(patch)
+    return { ok: true, ...patch }
+  } catch (e) {
+    return { ok: false, err: String((e && e.message) || e) }
+  }
+})
+
+ipcMain.handle('perf:saveMode', async (_e, mode) => {
+  try {
+    const v = String(mode || 'auto')
+    writeSettings({ accelMode: v })
+    return { ok: true, accelMode: v }
+  } catch (e) {
+    return { ok: false, err: String((e && e.message) || e) }
+  }
+})
+
+/* ══════════════════════════════════════════════════════════════════
+ * 性能测试执行器（供扩展 /ext/perfRun 调用，2026-10-26）
+ *
+ * 用户原话：
+ *   「浏览器扩展直接命令就不用，直接开始直接调用最佳性能免确认」
+ *   「没有就强制性进行测试，有就调用最近一次测试结果和用户的选择进行转码工作」
+ *
+ * 与 IPC perf:bench 的区别：
+ *   · perf:bench  → 界面手动触发，把结果返回给渲染层，由用户确认
+ *   · perfRunner  → 扩展命令触发，测完**自动选最佳模式并保存**，无需确认
+ * ══════════════════════════════════════════════════════════════════ */
+/**
+ * 把性能测试进度广播给渲染层（2026-10-26 用户要求）
+ *
+ * 用户原话：「扩展端强行进行性能测试应用端怎么没有弹窗提示正在进行性能测试」
+ *
+ * 原来 perfRunnerImpl.run() 在主进程里闷头跑，渲染层完全不知道，
+ * 用户看不到任何「正在测试」的迹象，会以为没反应。
+ */
+/**
+ * 取本机 CPU / GPU 型号名（给性能测试结果表格用，2026-10-26 用户要求）
+ *
+ * 用户要求表格里显示：
+ *   CPU    Ryzen 5 5600
+ *   GPU    NVIDIA GeForce RTX 5060 Ti
+ *   硬件加速  CPU+GPU
+ */
+/**
+ * 取本机 CPU / GPU 型号名（给性能测试结果表格用）
+ *
+ * ★★ 2026-10-26 事故修复 ★★
+ * 原来这里用 execFileSync('nvidia-smi') —— **同步阻塞主进程**。
+ * 而它被 perf:needTest 调用，boot() 第二句就 await 它。
+ * nvidia-smi 要 1~3 秒，驱动异常时可能永久挂起
+ *   → 主进程卡死 → 所有 IPC（包括 chats:list）排队等
+ *   → **用户看到：整个应用卡住 + 聊天记录全没了**
+ *
+ * 同一个文件第 2319 行我自己写着「必须用异步 execFile，execFileSync 会卡住主进程」。
+ *
+ * 现在：① 全部异步；② 结果内存缓存（换显卡才会变，不必每次查）。
+ */
+let _machineNamesCache = null
+let _machineNamesPromise = null
+
+function getMachineNames() {
+  /* 缓存命中直接返回（同步也很快，不阻塞） */
+  if (_machineNamesCache) return Promise.resolve(_machineNamesCache)
+  /* 并发去重：多个调用同时进来只跑一次 */
+  if (_machineNamesPromise) return _machineNamesPromise
+
+  _machineNamesPromise = new Promise((resolve) => {
+    const out = { cpuName: '', gpuName: '' }
+    try {
+      out.cpuName = String(os.cpus()[0]?.model || '').replace(/\s+/g, ' ').trim()
+    } catch { /* ignore */ }
+
+    const done = () => {
+      _machineNamesCache = out
+      _machineNamesPromise = null
+      resolve(out)
+    }
+
+    try {
+      /* ★ 异步 execFile：绝不阻塞主进程 */
+      execFile('nvidia-smi',
+        ['--query-gpu=name', '--format=csv,noheader'],
+        { timeout: 6000, windowsHide: true, encoding: 'utf8' },
+        (err, stdout) => {
+          try {
+            if (!err && stdout) out.gpuName = String(stdout).trim().split('\n')[0] || ''
+          } catch { /* ignore */ }
+          done()
+        })
+      /* 兜底：万一回调永不触发，超时后也返回（避免 perf:needTest 永远挂起） */
+      setTimeout(() => { if (!_machineNamesCache) done() }, 7000)
+    } catch {
+      done()
+    }
+  })
+
+  return _machineNamesPromise
+}
+
+function broadcastPerfEvent(payload) {
+  try {
+    for (const w of BrowserWindow.getAllWindows()) {
+      try { w.webContents.send('perf:event', payload) } catch { /* ignore */ }
+    }
+  } catch { /* ignore */ }
+}
+
+let perfRunnerImpl = null
+
+/** 内部：生成测试音频并跑三模式基准（复用 perf:bench 的逻辑） */
+async function runPerfBenchInternal(opts) {
+  const pyenv = path.join(TOOLS_DIR, 'pyenv', 'Scripts', 'python.exe')
+  if (!fs.existsSync(pyenv)) return { ok: false, err: '转写环境还没装好（缺少 tools/pyenv）' }
+  const benchPy = path.join(TOOLS_DIR, 'perf-bench.py')
+  if (!fs.existsSync(benchPy)) return { ok: false, err: '缺少 tools/perf-bench.py' }
+
+  /* 同上：转码中不测，测了也是错的数据 */
+  if (isTranscribing()) {
+    return { ok: false, err: '正在转码中，现在测出来的耗时不准确。请等这一节转码完成后再做性能测试。' }
+  }
+
+  /* 先确认 python 真能跑起来：换机器最常见的死因就是 pyenv 缺标准库/DLL */
+  const pyProbe = await probePython(pyenv)
+  if (!pyProbe.ok) {
+    return { ok: false, err: '转写环境起不来（python.exe 无法启动）：' + pyProbe.detail }
+  }
+
+  const { execFile } = require('node:child_process')
+  const stamp = Date.now()
+  const genPy = path.join(os.tmpdir(), 'sb-perf-gen-' + stamp + '.py')
+  const media = path.join(os.tmpdir(), 'sb-perf-media-' + stamp + '.mp4')
+  const outJson = path.join(os.tmpdir(), 'sb-perf-out-' + stamp + '.json')
+
+  const genSrc = [
+    'import os, sys',
+    'p = sys.argv[1]',
+    'sec = int(sys.argv[2])',
+    'sys.path.insert(0, sys.argv[3])',
+    'from transcribe import _patch_av_compat',
+    '_patch_av_compat()',
+    'import av, numpy as np',
+    'sr = 16000',
+    'out = av.open(p, mode="w")',
+    'st = out.add_stream("aac", rate=sr)',
+    'st.layout = "mono"',
+    'for i in range(0, sr * sec, 1024):',
+    '    n = min(1024, sr * sec - i)',
+    '    t = np.arange(i, i + n) / sr',
+    '    sig = np.sin(2 * np.pi * 440 * t) * 4000',
+    '    arr = sig.astype("int16").reshape(1, -1)',
+    '    fr = av.AudioFrame.from_ndarray(arr, format="s16", layout="mono")',
+    '    fr.sample_rate = sr',
+    '    fr.pts = i',
+    '    for pk in st.encode(fr):',
+    '        out.mux(pk)',
+    'for pk in st.encode(None):',
+    '    out.mux(pk)',
+    'out.close()',
+    'print("OK")',
+  ].join('\n')
+
+  const cleanup = () => {
+    for (const f of [genPy, media, outJson]) {
+      try { fs.rmSync(f, { force: true }) } catch { /* ignore */ }
+    }
+  }
+
+  return new Promise((resolve) => {
+    try { fs.writeFileSync(genPy, genSrc, 'utf8') } catch (e) {
+      cleanup()
+      return resolve({ ok: false, err: '写临时脚本失败' })
+    }
+    execFile(pyenv, [genPy, media, '30', TOOLS_DIR], { timeout: 180000, windowsHide: true },
+      (gErr) => {
+        if (gErr || !fs.existsSync(media)) {
+          cleanup()
+          const gRaw = String((gErr && gErr.stderr) || '') + ' ' + String((gErr && gErr.message) || '')
+          return resolve({ ok: false, err: '测试音频生成失败：' + (gRaw.trim().slice(-400) || '(无输出)') })
+        }
+        const env = { ...process.env, PYTHONIOENCODING: 'utf-8', HF_HUB_OFFLINE: '1' }
+        const modelArg = path.join(TOOLS_DIR, 'models', 'large-v3-turbo')
+        broadcastPerfEvent({ kind: 'stage', text: '性能测试：正在测三种模式（约 1~3 分钟）…' })
+        execFile(pyenv,
+          [benchPy, media, '--out', outJson, '--model-dir', modelArg,
+            '--speed', String((opts && opts.speed) || 'balanced')],
+          { timeout: 3600000, windowsHide: true, env },
+          (bErr, _o, bErrText) => {
+            let data = null
+            try {
+              if (fs.existsSync(outJson)) data = JSON.parse(fs.readFileSync(outJson, 'utf8'))
+            } catch { /* ignore */ }
+            cleanup()
+            if (!data) {
+              return resolve({
+                ok: false,
+                err: '基准测试失败：' + String((bErrText || '') + ((bErr && bErr.message) || '')).slice(-200),
+              })
+            }
+            data.ok = Boolean(data.ok)
+            resolve(data)
+          })
+      })
+  })
+}
+
+/** 注入给 extserver */
+perfRunnerImpl = {
+  /**
+   * 扩展命令触发：跑测试 → 自动选最佳模式 → 保存（免确认）
+   * 已有结果就直接返回（用户原话：「有就调用最近一次测试结果」）
+   */
+  async run(opts) {
+    const autoPick = !opts || opts.autoPick !== false
+    try {
+      const cur = readSettings() || {}
+      const hasResult = Boolean(
+        cur.perfTestedAt && cur.accelMode && cur.perfResult
+        && Array.isArray(cur.perfResult.modes) && cur.perfResult.modes.length > 0
+      )
+      if (hasResult) {
+        appendAppLog('[perf] 扩展命令：复用最近一次测试结果 accelMode=' + cur.accelMode)
+        return {
+          ok: true, reused: true,
+          autoSelected: false,   // 用的是用户自己选的模式，不是自动选的
+          accelMode: cur.accelMode,
+          testedAt: cur.perfTestedAt,
+          result: cur.perfResult,
+        }
+      }
+
+      appendAppLog('[perf] 扩展命令：没有测试结果 → 强制测试')
+      const r = await runPerfBenchInternal({})
+      if (!r || !r.ok) {
+        broadcastPerfEvent({ kind: 'failed', text: String((r && r.err) || '性能测试失败') })
+        appendAppLog('[perf] 扩展命令：测试失败 ' + String((r && r.err) || ''))
+        return { ok: false, error: 'perf-failed', message: String((r && r.err) || '性能测试失败') }
+      }
+
+      // 自动选最佳（免确认）
+      const rec = String(r.recommend || 'gpu')
+      const accelMode = rec === 'parallel' ? 'auto' : rec
+      const patch = {
+        perfTestedAt: Date.now(),
+        accelMode: autoPick ? accelMode : (readSettings() || {}).accelMode || accelMode,
+        perfResult: await (async () => {
+          const nm = await getMachineNames()
+          return {
+            dur: Number(r.dur || 0),
+            modes: Array.isArray(r.modes) ? r.modes : [],
+            recommend: rec,
+            gainVsSecond: Number(r.gainVsSecond || 0),
+            note: String(r.note || ''),
+            cpuName: nm.cpuName,
+            gpuName: nm.gpuName,
+          }
+        })(),
+      }
+      writeSettings(patch)
+      /* 2026-10-26 用户要求：扩展强制测试时，应用端也要弹窗提示「正在测」 */
+      broadcastPerfEvent({ kind: 'done', accelMode: patch.accelMode, result: patch.perfResult })
+      /* ★ 2026-10-26：把「自动选择」讲清楚，避免用户以为被偷偷改设置。
+       *   这次自动选的前提是：扩展命令触发时没有任何历史测试结果，
+       *   才按实测推荐值落定。之后用户随时可在设置里改。 */
+      appendAppLog('[perf] 扩展命令：首次使用 → 自动选用推荐模式 ' + patch.accelMode
+        + '（推荐=' + rec + '，领先第二名 ' + patch.perfResult.gainVsSecond + 's；用户可在设置中更改）')
+      return {
+        ok: true, reused: false,
+        autoSelected: true,
+        accelMode: patch.accelMode,
+        testedAt: patch.perfTestedAt,
+        result: patch.perfResult,
+      }
+    } catch (e) {
+      return { ok: false, error: 'perf-run-exception', message: String((e && e.message) || e) }
+    }
+  },
+
+  /** 给 /ext/perfState 用 */
+  getState() {
+    try {
+      const s = readSettings() || {}
+      const has = Boolean(
+        s.perfTestedAt && s.accelMode && s.perfResult
+        && Array.isArray(s.perfResult.modes) && s.perfResult.modes.length > 0
+      )
+      return {
+        needTest: !has,
+        accelMode: s.accelMode || '',
+        testedAt: s.perfTestedAt || 0,
+        result: s.perfResult || null,
+        running: false,
+      }
+    } catch {
+      return { needTest: true, accelMode: '', testedAt: 0, result: null, running: false }
+    }
+  },
+}
+
+/* 当前是否正在转码（2026-10-27）：
+ * 设置页打开时问一次，据此告诉用户「现在改要下次才生效」。 */
+ipcMain.handle('transcribe:busy', () => ({ ok: true, busy: isTranscribing() }))
 
 ipcMain.handle('transcribe:status', async () => {
   const p = transcribePaths()
@@ -2162,6 +2820,13 @@ app.whenReady().then(async () => {
 
   ensureDirs()
 
+  /* ★ 2026-10-26 审查修复：迁移旧版数据
+   *   原来 migrateLegacyData() 定义了却从未被调用 →
+   *   从旧版升级的用户，新目录里没有 chats.json / course-logs，
+   *   界面上就是"聊天记录没了"。
+   *   放在 ensureDirs() 之后、读任何数据之前。 */
+  try { migrateLegacyData() } catch (e) { console.error('[study-buddy] 迁移失败：', e?.message || e) }
+
   // 单实例判据：能否独占 39517。被占=已有实例在跑。
   const claim = await tryClaimPort(extPort)
   if (!claim.ok) {
@@ -2266,6 +2931,9 @@ app.whenReady().then(async () => {
 
     // 自动抓日志：扩展点「一键播放答题」时自动抓当前页面那节课，不用用户手动操作
     ext.setAutoCaptureHandler(handleAutoCapture)
+
+    // 性能测试执行器：扩展命令时由应用在后台跑三模式基准（2026-10-26）
+    try { setPerfRunner(perfRunnerImpl) } catch (e) { appendAppLog('[perf] 注入失败 ' + String(e && e.message || e)) }
 
     // 交卷回执：扩展把「实际交了什么」报回来，留档供用户事后核对
     ext.setQuizSubmittedHandler(async ({ body }) => {

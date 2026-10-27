@@ -167,12 +167,13 @@ function buildZip(files, outName, baseDir, label) {
   const zipPath = path.join(DIST, outName)
   try { fs.unlinkSync(zipPath) } catch { /* ignore */ }
 
-  const ps = [
-    'Add-Type -AssemblyName System.IO.Compression.FileSystem',
-    `[IO.Compression.ZipFile]::CreateFromDirectory('${stage.replace(/\//g, '\\')}', '${zipPath.replace(/\//g, '\\')}', [IO.Compression.CompressionLevel]::Optimal, $false)`,
-  ].join('\n')
+  /* ★ 2026-10-27 改：CreateFromDirectory 在 Windows 上写反斜杠条目名，不符合 ZIP 规范，
+   *   改用 tools/zip-slash.ps1 显式写正斜杠。 */
   try {
-    execFileSync('powershell', ['-NoProfile', '-Command', ps], { encoding: 'utf8', stdio: 'pipe' })
+    execFileSync('powershell', [
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', path.join(ROOT, 'tools', 'zip-slash.ps1'),
+      '-Src', stage, '-Dst', zipPath,
+    ], { encoding: 'utf8', stdio: 'pipe' })
   } catch (e) {
     console.error(`❌ ${label} 打包失败:`, e.message.slice(0, 300))
     process.exit(1)

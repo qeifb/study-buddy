@@ -183,81 +183,87 @@
 
           <div class="pane-divider"></div>
 
-          <div class="pane-title">硬件加速</div>
-          <div class="field">
-            <div class="field-tip">有 NVIDIA 独立显卡时，用 GPU 转写比 CPU 快一倍以上。没有独立显卡（AMD / Intel 集显）会自动用 CPU，不影响使用。</div>
-            <label class="chk">
-              <input type="checkbox" id="set-hwaccel" checked>
-              <span>使用硬件加速（推荐开启）</span>
+        <div class="pane-title">硬件加速</div>
+        <div class="field">
+          <div class="field-tip" id="gpu-title-tip">
+            <b>仅 NVIDIA 显卡可用</b>（AMD / Intel 集显不支持——底层推理库没有对应后端）。
+            开启后会把音频切两半，<b>CPU 和显卡同时转</b>，比只用 CPU 快不少。
+          </div>
+          <!-- ★ 2026-10-26 合并：删掉「启用硬件加速」复选框。
+               用户指出：「选择自动、仅cpu、仅GPU 已经是在设置硬件加速了」
+               三选一本身就是硬件加速的开关，再加一个复选框等于两套开关控制同一行为。 -->
+          <div id="set-accel-wrap" style="margin-top:10px">
+            <label class="chk" style="margin-bottom:6px" id="accel-wrap-auto">
+              <input type="radio" name="accelmode" value="auto" checked>
+              <span><b>自动（推荐）</b> —— CPU + GPU 同时转，速度最快</span>
             </label>
-            <div id="set-accel-wrap" style="margin-top:8px">
-              <label class="chk" style="margin-bottom:4px">
-                <input type="radio" name="accelmode" value="auto" checked>
-                <span>自动 —— 有 NVIDIA 显卡就用 GPU，失败自动退回 CPU</span>
-              </label>
-              <label class="chk" style="margin-bottom:4px">
-                <input type="radio" name="accelmode" value="gpu">
-                <span>优先 GPU —— 强制使用显卡（不降级，GPU 不可用会报错）</span>
-              </label>
-              <label class="chk">
-                <input type="radio" name="accelmode" value="cpu">
-                <span>优先 CPU —— 只用处理器（省电、避免显卡被占用时卡顿）</span>
-              </label>
-            </div>
-            <div class="field-tip" id="set-accel-hint" style="margin-top:6px;color:#8b9199"></div>
+            <label class="chk" style="margin-bottom:6px" id="accel-wrap-gpu">
+              <input type="radio" name="accelmode" value="gpu">
+              <span><b>仅显卡</b> —— 只让 GPU 转，CPU 空出来干别的</span>
+            </label>
+            <label class="chk" id="accel-wrap-cpu">
+              <input type="radio" name="accelmode" value="cpu">
+              <span><b>仅 CPU</b> —— 不用显卡（省电、显卡被游戏占用时选这个）</span>
+            </label>
+          </div>
+          <!-- ★ 2026-10-27：转码进行中时告诉用户「现在改要下次才生效」。
+               两个模式都是 spawn 前读一次设置当命令行参数传下去，中途改对当前任务没用。 -->
+          <div class="field-tip" id="set-accel-live" hidden
+               style="margin-top:8px;color:#c8a24a;background:rgba(200,162,74,.10);
+                      border-left:3px solid #c8a24a;padding:7px 10px;border-radius:4px;
+                      line-height:1.6">
+            ⏳ 正在转码中。<b>这里改了不会影响正在跑的这一节</b>，会在下一次转码时生效。
+          </div>
+          <div class="row" style="margin-top:10px">
+            <button class="btn" id="btn-gpu-status">🔍 检测显卡状态</button>
+            <button class="btn" id="btn-install-gpu">⬇ 下载 GPU 组件</button>
+            <button class="btn" id="btn-perf-test">⚡ 性能测试</button>
+          </div>
+          <div class="field-tip" id="set-gpu-hint" style="margin-top:6px;color:#8b9199"></div>
+          <!-- 性能测试结果表格（2026-10-26 用户要求：依次往下堆叠） -->
+          <div id="perf-result-wrap" hidden style="margin-top:10px">
+            <table class="perf-result-table">
+              <thead>
+                <tr>
+                  <th colspan="3" class="perf-th-center">固定素材测试</th>
+                </tr>
+              </thead>
+              <tbody id="perf-result-body"></tbody>
+            </table>
+          </div>
         </div>
-
         <div class="pane-divider"></div>
 
         <div class="pane-title">转码速度</div>
         <div class="field">
           <div class="field-tip">
-            控制转码时占用多少 CPU。按「当前空闲部分」计算：
-            若你已用 20%，选 80% 则总占用约 84%。档位越高转得越快，但电脑越卡。
+            档位越高转得越快，但电脑越卡。日常用「平衡模式」即可。
           </div>
           <label class="chk" style="margin-bottom:6px">
             <input type="radio" name="transspeed" value="performance">
-            <span><b>性能优先</b> —— 占用空闲 CPU 的 80%，转码最快</span>
+            <span><b>性能优先</b> —— 转码最快</span>
           </label>
           <label class="chk" style="margin-bottom:6px">
             <input type="radio" name="transspeed" value="balanced" checked>
-            <span><b>平衡模式</b> —— 占用 60%，速度与流畅兼顾（推荐）</span>
+            <span><b>平衡模式</b> —— 速度与流畅兼顾（推荐）</span>
           </label>
           <label class="chk">
             <input type="radio" name="transspeed" value="quiet">
-            <span><b>静音模式</b> —— 占用 40%，转码慢但电脑几乎不卡</span>
+            <span><b>静音模式</b> —— 转码慢，但电脑几乎不卡</span>
           </label>
           <div class="field-tip" id="set-speed-hint" style="margin-top:6px;color:#8b9199"></div>
         </div>
-
-        <div class="pane-divider"></div>
-
-        <div class="pane-title">CPU + GPU 同时转码</div>
-        <div class="field">
-          <div class="field-tip" id="set-parallel-tip">
-            把音频切两半，一半给 CPU、一半给显卡，同时跑。
-            <b>仅 NVIDIA 显卡可用</b>——A 卡 / Intel 集显不支持（底层库无对应后端）。
-          </div>
-          <label class="chk" id="set-parallel-wrap">
-            <input type="checkbox" id="set-parallel">
-            <span>启用 CPU+GPU 一起转码（需先安装 GPU 组件）</span>
-          </label>
-          <div class="row" style="margin-top:8px">
-            <button class="btn" id="btn-gpu-status">🔍 检测 GPU 状态</button>
-            <button class="btn" id="btn-install-gpu">⬇ 下载 GPU 组件</button>
-          </div>
-          <div class="field-tip" id="set-gpu-hint" style="margin-top:6px;color:#8b9199"></div>
-        </div>
-          </div>
 
           <div class="pane-divider"></div>
 
           <div class="pane-title">磁盘占用</div>
           <div class="field">
             <div class="field-tip">所有数据都在程序目录里，没有往 C 盘乱写。</div>
+            <!-- 树状统计表（2026-10-26 用户要求：不用一条条排行展示） -->
             <div id="disk-usage" class="disk-box">
               <div id="disk-prog" class="disk-part">正在统计…</div>
-              <div id="disk-c" class="disk-part"></div>
+              <div id="disk-tree"></div>
+              <div id="disk-c"></div>
             </div>
             <div class="row" style="margin-top:8px">
               <button class="btn" id="btn-disk-refresh">🔄 重新统计</button>
@@ -292,5 +298,39 @@
     </div>
   </div>
 
-  <script src="app.js"></script></body>
+  <script src="app.js"></script>
+    <!-- ═══════════════════════════════════════════════════════════
+         转码前性能测试弹窗（2026-10-26 用户需求）
+         用户原话：
+           「以后打开应用开始转码前先出现一个弹窗，提示开始转码前先做一次性能测试，
+            看3种模式哪种合适，并把测试结果展示出来和模式选择框展示出来
+            并推荐用户选择哪种模式…仅只做推荐，用户想选择其他模式还是可以自行选择」
+         注意：只做推荐，不给"不推荐"的备注说明。
+         ═══════════════════════════════════════════════════════════ -->
+    <div class="modal-mask" id="mask-perf" hidden>
+      <div class="modal" style="width:620px">
+        <div class="modal-head">
+          <span>开始转码前先做一次性能测试</span>
+          <button class="icon-btn" id="perf-close" title="关闭">×</button>
+        </div>
+        <div class="modal-sub">
+          用一段 30 秒合成音频分别跑三种模式，实测哪种最快。测试大约 1~3 分钟。
+        </div>
+        <div class="modal-body" id="perf-body">
+          <div class="perf-state" id="perf-state">准备中…</div>
+          <table class="perf-table" id="perf-table" hidden>
+            <thead>
+              <tr><th>模式</th><th>耗时</th><th>实时率</th><th></th></tr>
+            </thead>
+            <tbody id="perf-rows"></tbody>
+          </table>
+          <div class="perf-note" id="perf-note" hidden></div>
+        </div>
+        <div class="modal-foot">
+          <button class="btn" id="perf-rerun">重新测试</button>
+          <button class="btn primary" id="perf-apply" disabled>应用所选模式</button>
+        </div>
+      </div>
+    </div>
+</body>
 </html>

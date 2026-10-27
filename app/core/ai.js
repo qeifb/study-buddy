@@ -31,8 +31,12 @@ const DEFAULTS = {
    * qwen-vl-max-latest / qwen2.5-vl-* 返回 403 Access denied（未开通）。
    */
   visionModel: 'qwen3-vl-plus',
-  /* ★ 2026-10-25：识图可以单独配地址和 Key（不同厂商）
-   *   留空 = 沿用上面「对话模型」的 baseUrl / apiKey，老配置不受影响。 */
+  /* accelMode（2026-10-25 语义合并）：
+   *   'auto' → CPU + GPU 一起转（推荐，最快）
+   *   'gpu'  → 只用显卡
+   *   'cpu'  → 只用 CPU
+   * ★ 2026-10-25：识图可以单独配地址和 Key（不同厂商）
+   *   留空 = 沿用上面「对话模型」的 baseUrl / apiKey，老配置不受影响。  * ★ 2026-10-26：这是硬件加速的**唯一开关**（原来的 hardwareAccel 复选框已删除） */
   visionBaseUrl: '',
   visionApiKey: '',
   apiKey: '',
@@ -61,13 +65,9 @@ const DEFAULTS = {
 
    */
 
-  hardwareAccel: true,
   /* ★ 2026-10-25 转码速度：控制 CPU 占用。注意是「空闲部分」的百分比：
    *   当前已用 20% → performance 上限 = 20 + (100-20)*0.8 = 84% */
   transSpeed: 'balanced',
-  /* ★ 2026-10-25 CPU+GPU 一起转（真正的硬件加速）。
-   *   需要 NVIDIA 卡 + 已装 GPU 组件；缺任一则自动退回单路。 */
-  hardwareParallel: false,
 
   accelMode: 'auto',
   /** 系统提示词：约束「不遗漏不虚报不弄虚作假」 */

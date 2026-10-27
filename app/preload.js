@@ -102,6 +102,17 @@ contextBridge.exposeInMainWorld('studyBuddy', {
     status: () => invoke('transcribe:status'),
     setup: () => invoke('transcribe:setup'),
     onLog: (handler) => subscribe('transcribe:setup-log', handler),
+    /* 当前是否有转写在跑（2026-10-27：设置页据此提示「下次生效」）*/
+    busy: () => invoke('transcribe:busy'),
+  },
+
+  /* 三模式性能基准（2026-10-26 用户需求：转码前先测速并推荐模式）*/
+  perf: {
+    bench: (opts) => ipcRenderer.invoke('perf:bench', opts || {}),
+    needTest: () => ipcRenderer.invoke('perf:needTest'),
+    saveResult: (payload) => ipcRenderer.invoke('perf:saveResult', payload),
+    saveMode: (mode) => ipcRenderer.invoke('perf:saveMode', mode),
+    onEvent: (h) => { const f = (_e, d) => h(d); ipcRenderer.on('perf:event', f); return () => ipcRenderer.removeListener('perf:event', f) },
   },
 
   shell: {
